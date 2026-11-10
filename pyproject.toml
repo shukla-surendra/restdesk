@@ -1,0 +1,35 @@
+[project]
+name = "restdesk"
+version = "0.2.0"
+description = "Lightweight local REST client: collections, environments, scripts and persistent call history"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["rest", "http", "api", "client", "insomnia", "postman", "curl"]
+classifiers = [
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/shukla-surendra/restdesk"
+Documentation = "https://github.com/shukla-surendra/restdesk/tree/main/docs"
+Issues = "https://github.com/shukla-surendra/restdesk/issues"
+
+[project.scripts]
+restdesk = "restdesk.server:main"
+
+[build-system]
+requires = ["uv_build>=0.8,<0.13"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

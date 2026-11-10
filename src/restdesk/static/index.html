@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RestDesk</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="brand">Rest<b>Desk</b></span>
+      <button id="btnNewCol" class="icon" title="New collection">＋</button>
+    </div>
+    <input id="filter" class="filter" placeholder="Filter requests…">
+    <div id="tree"></div>
+    <div class="side-section">
+      <div class="side-title"><span>History <span id="histCount" class="badge"></span></span><button id="btnClearHist" class="link">clear</button></div>
+      <input id="histFilter" class="filter" placeholder="Search history (url, status…)">
+      <div id="history"></div>
+    </div>
+    <div class="side-foot">
+      <button id="btnExport" class="link">Export</button>
+      <button id="btnImport" class="link">Import</button>
+      <input id="fileImport" type="file" accept=".json,application/json" hidden>
+      <span id="saveState"></span>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div id="topbar">
+      <input id="reqName" class="title-input" placeholder="Request name">
+      <div class="spacer"></div>
+      <label class="env-label">Env
+        <select id="envSelect"></select>
+      </label>
+      <button id="btnEnv">Environments</button>
+      <button id="btnImportCurl">Import cURL</button>
+      <button id="btnCopyCurl">Copy cURL</button>
+      <button id="btnRunCol" title="Run every request in this collection">Run collection</button>
+    </div>
+
+    <div id="urlbar">
+      <select id="method">
+        <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
+        <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
+      </select>
+      <input id="url" placeholder="https://api.example.com/users/{{userId}}" spellcheck="false" autocomplete="off">
+      <button id="btnSend" class="primary">Send</button>
+    </div>
+    <div id="resolved" class="resolved"></div>
+
+    <div id="panes">
+      <section id="reqPane" class="pane">
+        <nav class="tabs" data-group="req">
+          <button data-tab="params" class="active">Params</button>
+          <button data-tab="headers">Headers</button>
+          <button data-tab="body">Body</button>
+          <button data-tab="auth">Auth</button>
+          <button data-tab="scripts">Scripts</button>
+          <button data-tab="settings">Settings</button>
+        </nav>
+        <div class="tab-body" data-panel="params"><div id="paramsKV"></div></div>
+        <div class="tab-body" data-panel="headers" hidden><div id="headersKV"></div></div>
+        <div class="tab-body" data-panel="body" hidden>
+          <div class="row">
+            <select id="bodyMode">
+              <option value="none">No body</option>
+              <option value="json">JSON</option>
+              <option value="text">Text</option>
+              <option value="xml">XML</option>
+              <option value="urlencoded">Form URL-encoded</option>
+              <option value="multipart">Multipart form</option>
+            </select>
+            <button id="btnBeautify" class="small">Beautify JSON</button>
+          </div>
+          <textarea id="bodyText" class="code" spellcheck="false" placeholder='{ "name": "{{userName}}" }'></textarea>
+          <div id="bodyFormKV"></div>
+        </div>
+        <div class="tab-body" data-panel="auth" hidden>
+          <div class="row"><select id="authType">
+            <option value="none">No auth</option>
+            <option value="bearer">Bearer token</option>
+            <option value="basic">Basic auth</option>
+            <option value="apikey">API key</option>
+          </select></div>
+          <div id="authFields" class="form-grid"></div>
+        </div>
+        <div class="tab-body" data-panel="scripts" hidden>
+          <label class="lbl">Pre-request script <span class="hint">runs before variables are resolved — <code>env.set('ts', Date.now())</code>, <code>req.setHeader('X-Id', '1')</code></span></label>
+          <textarea id="preScript" class="code short" spellcheck="false"></textarea>
+          <label class="lbl">Tests / post-response script <span class="hint"><code>test('ok', () =&gt; expect(res.status).toBe(200))</code>, <code>env.set('token', res.json().token)</code></span></label>
+          <textarea id="postScript" class="code short" spellcheck="false"></textarea>
+        </div>
+        <div class="tab-body" data-panel="settings" hidden>
+          <div class="form-grid">
+            <label>Timeout (ms)</label><input id="setTimeout" type="number" min="100" step="100">
+            <label>Follow redirects</label><input id="setFollow" type="checkbox">
+            <label>Verify TLS certificates</label><input id="setVerify" type="checkbox">
+          </div>
+        </div>
+      </section>
+
+      <section id="resPane" class="pane">
+        <div id="statusLine" class="status-line"><span class="muted">Send a request to see the response · ⌘/Ctrl+Enter</span></div>
+        <nav class="tabs" data-group="res">
+          <button data-tab="rbody" class="active">Body</button>
+          <button data-tab="rheaders">Headers <span id="hdrCount" class="badge"></span></button>
+          <button data-tab="rtests">Tests <span id="testCount" class="badge"></span></button>
+        </nav>
+        <div class="tab-body" data-panel="rbody">
+          <div class="row">
+            <button id="btnPretty" class="small toggle on">Pretty</button>
+            <button id="btnRaw" class="small toggle">Raw</button>
+            <input id="jsonFilter" class="grow" placeholder="Filter JSON: $.data[0].name" spellcheck="false">
+            <button id="btnCopyBody" class="small">Copy</button>
+          </div>
+          <div id="resBody" class="res-body"></div>
+        </div>
+        <div class="tab-body" data-panel="rheaders" hidden><table id="resHeaders" class="hdr-table"></table></div>
+        <div class="tab-body" data-panel="rtests" hidden><div id="resTests"></div></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<dialog id="envDialog" class="dlg wide">
+  <div class="dlg-head"><b>Environments</b><button class="icon" data-close>✕</button></div>
+  <div class="env-layout">
+    <div class="env-list">
+      <div id="envList"></div>
+      <button id="btnAddEnv" class="small">＋ Environment</button>
+    </div>
+    <div class="env-edit">
+      <div class="row"><input id="envName" class="grow" placeholder="Environment name"><button id="btnDelEnv" class="small danger">Delete</button></div>
+      <div id="envKV"></div>
+      <p class="hint">Use as <code>{{name}}</code> anywhere: URL, params, headers, body, auth. Built-ins: <code>{{$uuid}}</code> <code>{{$timestamp}}</code> <code>{{$isoTimestamp}}</code> <code>{{$randomInt}}</code></p>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="curlDialog" class="dlg">
+  <div class="dlg-head"><b>Import cURL</b><button class="icon" data-close>✕</button></div>
+  <textarea id="curlText" class="code" spellcheck="false" placeholder="curl -X POST https://api.example.com/items -H 'Content-Type: application/json' -d '{&quot;a&quot;:1}'"></textarea>
+  <div class="row end"><button id="btnDoCurl" class="primary">Import as new request</button></div>
+</dialog>
+
+<dialog id="runDialog" class="dlg wide">
+  <div class="dlg-head"><b id="runTitle">Collection run</b><button class="icon" data-close>✕</button></div>
+  <div id="runSummary" class="run-summary"></div>
+  <table id="runTable" class="hdr-table"></table>
+</dialog>
+
+<datalist id="commonHeaders">
+  <option>Accept</option><option>Accept-Encoding</option><option>Accept-Language</option>
+  <option>Authorization</option><option>Cache-Control</option><option>Content-Type</option>
+  <option>Cookie</option><option>If-None-Match</option><option>Origin</option>
+  <option>User-Agent</option><option>X-Request-Id</option><option>X-Api-Key</option>
+</datalist>
+
+<script src="app.js"></script>
+</body>
+</html>
