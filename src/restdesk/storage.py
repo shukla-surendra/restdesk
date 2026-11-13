@@ -7,6 +7,9 @@ Everything the UI creates lives in one SQLite file:
 - ``meta``                        - small key/value settings (active env, last open request)
 - ``history``                     - every call you send, with the request snapshot, the
                                     resolved request, the response and test results
+- ``trash``                       - deleted collections/requests, restorable for 30 days
+
+The schema is versioned (``meta.schemaVersion``); ``MIGRATIONS`` upgrades older files in place.
 
 Only the standard library ``sqlite3`` module is used. Writes are serialised with a lock and
 run inside transactions, so a crash never leaves a half-written workspace.
@@ -19,9 +22,10 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-SCHEMA_VERSION = 1
+from .redact import MASK, redact_result, redact_snapshot
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -74,6 +78,42 @@ CREATE INDEX IF NOT EXISTS history_by_ts ON history(ts DESC);
 CREATE INDEX IF NOT EXISTS history_by_request ON history(request_id, ts DESC);
 """
 
+
+def _m2_trash_and_revision(db: sqlite3.Connection) -> None:
+    db.execute("""CREATE TABLE IF NOT EXISTS trash (
+        id              TEXT PRIMARY KEY,
+        kind            TEXT NOT NULL,          -- 'collection' | 'request'
+        name            TEXT NOT NULL,
+        collection_id   TEXT,
+        collection_name TEXT,
+        data            TEXT NOT NULL,
+        deleted_at      REAL NOT NULL
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS trash_by_time ON trash(deleted_at DESC)")
+    db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('revision', '0')")
+
+
+# version -> upgrade step. Append new steps; never edit a released one.
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _m2_trash_and_revision,
+}
+SCHEMA_VERSION = max(MIGRATIONS)
+TRASH_DAYS = 30
+TRASH_MAX = 500
+
+
+class SchemaTooNew(RuntimeError):
+    pass
+
+
+class Conflict(Exception):
+    """The workspace was saved by someone else (another tab) since the caller loaded it."""
+
+    def __init__(self, revision: int) -> None:
+        super().__init__(f"workspace changed (now at revision {revision})")
+        self.revision = revision
+
+
 # Columns returned by history listings (the heavy snapshot/result blobs are fetched on demand).
 _HISTORY_SUMMARY = ("id, ts, source, request_id, name, method, url, status, time_ms, size, "
                     "tests_pass, tests_fail")
@@ -89,10 +129,11 @@ def _dumps(obj: Any) -> str:
 
 class Store:
     def __init__(self, path: Path, history_limit: int = 2000,
-                 max_stored_body: int = 2 * 1024 * 1024) -> None:
+                 max_stored_body: int = 2 * 1024 * 1024, redact_history: bool = True) -> None:
         self.path = Path(path)
         self.history_limit = history_limit      # 0 = keep everything
         self.max_stored_body = max_stored_body  # response bodies larger than this are clipped
+        self.redact_history = redact_history    # mask tokens/passwords before storing calls
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
@@ -101,7 +142,30 @@ class Store:
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
-        self._set_meta_default("schemaVersion", SCHEMA_VERSION)
+        self._set_meta_default("schemaVersion", 1)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self._tx() as db:
+            current = int(json.loads(db.execute(
+                "SELECT value FROM meta WHERE key='schemaVersion'").fetchone()[0]))
+            if current > SCHEMA_VERSION:
+                raise SchemaTooNew(f"{self.path} was written by a newer RestDesk "
+                                   f"(schema {current} > {SCHEMA_VERSION}); please upgrade")
+            for version in sorted(v for v in MIGRATIONS if v > current):
+                MIGRATIONS[version](db)
+                db.execute("UPDATE meta SET value=? WHERE key='schemaVersion'", (_dumps(version),))
+
+    @property
+    def schema_version(self) -> int:
+        with self._lock:
+            return int(json.loads(self._db.execute(
+                "SELECT value FROM meta WHERE key='schemaVersion'").fetchone()[0]))
+
+    def revision(self) -> int:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()
+        return int(json.loads(row[0])) if row else 0
 
     # ------------------------------------------------------------------ helpers
     class _Tx:
@@ -144,7 +208,7 @@ class Store:
             db = self._db
             meta = {r["key"]: json.loads(r["value"]) for r in db.execute("SELECT key, value FROM meta")}
             if not meta.get("initialized"):
-                return {}
+                return {"revision": int(meta.get("revision", 0))}
             cols = []
             for c in db.execute("SELECT * FROM collections ORDER BY position"):
                 col = {**json.loads(c["extra"] or "{}"), "id": c["id"], "name": c["name"],
@@ -157,22 +221,31 @@ class Store:
                     for e in db.execute("SELECT * FROM environments ORDER BY position")]
         return {
             "version": meta.get("workspaceVersion", 1),
+            "revision": int(meta.get("revision", 0)),
             "activeEnvId": meta.get("activeEnvId"),
             "lastRequestId": meta.get("lastRequestId"),
             "environments": envs,
             "collections": cols,
         }
 
-    def save_workspace(self, ws: dict) -> None:
+    def save_workspace(self, ws: dict, base_revision: int | None = None) -> int:
         """Make the stored collections/requests/environments match ``ws`` exactly.
 
-        Rows are upserted and only changed rows are rewritten; anything not present in
-        ``ws`` is deleted. History is never touched here.
+        Rows are upserted and only changed rows are rewritten; collections and requests not
+        present in ``ws`` move to the trash. History is never touched here.
+
+        ``base_revision`` is the revision the caller loaded. If someone saved in between, the
+        save is refused with :class:`Conflict` instead of silently overwriting their work.
+        Returns the new revision.
         """
         if not isinstance(ws, dict) or not isinstance(ws.get("collections"), list):
             raise ValueError("workspace must be an object with a 'collections' list")
         now = _now()
         with self._tx() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()
+            current = int(json.loads(row[0])) if row else 0
+            if base_revision is not None and int(base_revision) != current:
+                raise Conflict(current)
             keep_cols: list[str] = []
             keep_reqs: list[str] = []
             for ci, col in enumerate(ws["collections"]):
@@ -202,6 +275,7 @@ class Store:
                              OR position IS NOT excluded.position OR data IS NOT excluded.data""",
                         (rid, cid, ri, str(req.get("name") or ""), str(req.get("method") or "GET"),
                          str(req.get("url") or ""), _dumps(req), now))
+            self._trash_missing(db, keep_cols, keep_reqs, now)
             self._delete_missing(db, "requests", keep_reqs)
             self._delete_missing(db, "collections", keep_cols)
 
@@ -222,9 +296,68 @@ class Store:
             for key, value in (("activeEnvId", ws.get("activeEnvId")),
                                ("lastRequestId", ws.get("lastRequestId")),
                                ("workspaceVersion", ws.get("version", 1)),
-                               ("initialized", True)):
+                               ("initialized", True),
+                               ("revision", current + 1)):
                 db.execute("INSERT INTO meta(key, value) VALUES (?, ?) "
                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, _dumps(value)))
+        return current + 1
+
+    # ------------------------------------------------------------------ trash
+    @staticmethod
+    def _trash_missing(db: sqlite3.Connection, keep_cols: list, keep_reqs: list, now: float) -> None:
+        keep_c, keep_r = set(keep_cols), set(keep_reqs)
+        col_names = {r["id"]: r["name"] for r in db.execute("SELECT id, name FROM collections")}
+        gone_cols = [cid for cid in col_names if cid not in keep_c]
+        for cid in gone_cols:
+            c = db.execute("SELECT * FROM collections WHERE id=?", (cid,)).fetchone()
+            reqs = [json.loads(r["data"]) for r in db.execute(
+                "SELECT data FROM requests WHERE collection_id=? ORDER BY position", (cid,))]
+            reqs = [r for r in reqs if r.get("id") not in keep_r]  # moved elsewhere = not deleted
+            data = {**json.loads(c["extra"] or "{}"), "id": cid, "name": c["name"],
+                    "collapsed": bool(c["collapsed"]), "requests": reqs}
+            db.execute("INSERT OR REPLACE INTO trash VALUES (?, 'collection', ?, NULL, NULL, ?, ?)",
+                       (cid, c["name"], _dumps(data), now))
+        gone = set(gone_cols)
+        for r in db.execute("SELECT id, collection_id, data FROM requests").fetchall():
+            if r["id"] in keep_r or r["collection_id"] in gone:
+                continue
+            data = json.loads(r["data"])
+            db.execute("INSERT OR REPLACE INTO trash VALUES (?, 'request', ?, ?, ?, ?, ?)",
+                       (r["id"], str(data.get("name") or ""), r["collection_id"],
+                        col_names.get(r["collection_id"]), _dumps(data), now))
+        # Items that came back (Undo after an autosave) are no longer deleted.
+        db.executemany("DELETE FROM trash WHERE id=?", [(i,) for i in keep_c | keep_r])
+        db.execute("DELETE FROM trash WHERE deleted_at < ?", (now - TRASH_DAYS * 86400,))
+        db.execute("DELETE FROM trash WHERE id IN (SELECT id FROM trash ORDER BY deleted_at DESC "
+                   "LIMIT -1 OFFSET ?)", (TRASH_MAX,))
+
+    def list_trash(self) -> list:
+        with self._lock:
+            rows = self._db.execute("SELECT id, kind, name, collection_id, collection_name, data, "
+                                    "deleted_at FROM trash ORDER BY deleted_at DESC").fetchall()
+        out = []
+        for r in rows:
+            data = json.loads(r["data"])
+            out.append({"id": r["id"], "kind": r["kind"], "name": r["name"],
+                        "collectionId": r["collection_id"], "collectionName": r["collection_name"],
+                        "deletedAt": int(r["deleted_at"] * 1000),
+                        "requestCount": len(data.get("requests") or []) if r["kind"] == "collection" else None,
+                        "method": data.get("method"), "url": data.get("url")})
+        return out
+
+    def take_from_trash(self, tid: str) -> dict | None:
+        """Remove an item from the trash and return it so the caller can put it back."""
+        with self._tx() as db:
+            r = db.execute("SELECT * FROM trash WHERE id=?", (tid,)).fetchone()
+            if not r:
+                return None
+            db.execute("DELETE FROM trash WHERE id=?", (tid,))
+        return {"id": r["id"], "kind": r["kind"], "collectionId": r["collection_id"],
+                "collectionName": r["collection_name"], "data": json.loads(r["data"])}
+
+    def empty_trash(self) -> int:
+        with self._tx() as db:
+            return db.execute("DELETE FROM trash").rowcount
 
     @staticmethod
     def _delete_missing(db: sqlite3.Connection, table: str, keep: Iterable[str]) -> None:
@@ -239,11 +372,22 @@ class Store:
         """Store one sent call. Returns the stored summary row."""
         snapshot = entry.get("snapshot") or {}
         result = dict(entry.get("result") or {})
+        if self.redact_history:
+            before = (_dumps(snapshot) + _dumps(result)).count(MASK)
+            snapshot, result = redact_snapshot(snapshot), redact_result(result)
+            changed = (_dumps(snapshot) + _dumps(result)).count(MASK) > before
+            if changed:
+                result["redacted"] = True  # tells the UI to say "secrets redacted"
         response = dict(result.get("response") or {})
         body = response.get("body")
         if isinstance(body, str) and len(body) > self.max_stored_body:
-            response["body"] = body[: self.max_stored_body]
-            response["storedTruncated"] = True
+            if response.get("bodyEncoding") == "base64":
+                # A clipped base64 payload is just corrupt data, so keep only the metadata.
+                response["body"] = ""
+                response["bodyNotStored"] = True
+            else:
+                response["body"] = body[: self.max_stored_body]
+                response["storedTruncated"] = True
         if response:
             result["response"] = response
         tests = result.get("tests") or []

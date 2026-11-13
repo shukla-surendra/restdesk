@@ -1,6 +1,6 @@
 [project]
 name = "restdesk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lightweight local REST client: collections, environments, scripts and persistent call history"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,7 +29,11 @@ requires = ["uv_build>=0.8,<0.13"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "playwright>=1.60.0",
+    "pytest>=8",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["e2e: browser tests (need Playwright + Chromium)"]

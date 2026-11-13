@@ -23,47 +23,112 @@ async function api(path, opts = {}) {
     ...opts,
     headers: { 'Content-Type': 'application/json', 'X-RestDesk': '1', ...(opts.headers || {}) },
   });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const err = new Error(`${r.status} ${await r.text()}`);
+    err.status = r.status;
+    throw err;
+  }
   return r.json();
 }
 
-let saveTimer = null;
-/* Write pending changes now (used before export and when the tab closes). */
-async function flushSave(beacon = false) {
-  if (!saveTimer) return;
-  clearTimeout(saveTimer); saveTimer = null;
-  const body = JSON.stringify(ws);
-  if (beacon) {
-    // keepalive lets the PUT finish even while the page unloads
-    fetch('/api/workspace', { method: 'PUT', body, keepalive: true, headers: { 'Content-Type': 'application/json', 'X-RestDesk': '1' } });
-    return;
-  }
-  await api('/api/workspace', { method: 'PUT', body });
-  $('#saveState').textContent = 'saved';
-}
-function save() {
-  clearTimeout(saveTimer);
-  $('#saveState').textContent = 'saving…';
-  saveTimer = setTimeout(async () => {
-    saveTimer = null;
-    try {
-      await api('/api/workspace', { method: 'PUT', body: JSON.stringify(ws) });
-      $('#saveState').textContent = 'saved';
-    } catch (e) {
-      toast('Save failed — is the RestDesk server running?');
-      $('#saveState').textContent = 'save failed';
-      console.error(e);
-    }
-  }, 350);
+/* ------------------------------------------------------------------ */
+/* Saving                                                              */
+/*                                                                     */
+/* Every save carries the revision this tab last loaded or saved. If    */
+/* another tab saved in between, the server answers 409 instead of      */
+/* overwriting that tab's work. Tabs also tell each other about saves   */
+/* over a BroadcastChannel, so idle tabs quietly reload and conflicts   */
+/* only happen when two tabs edit at the same moment.                   */
+/* ------------------------------------------------------------------ */
+let wsRevision = 0;
+let saveTimer = null;      // debounce timer for a pending save
+let saveInFlight = null;   // promise of the PUT currently running
+const KEEPALIVE_LIMIT = 60 * 1024; // browsers cap keepalive request bodies at 64 KB
+const channel = 'BroadcastChannel' in window ? new BroadcastChannel('restdesk') : null;
+const hasPendingSave = () => !!saveTimer || !!saveInFlight;
+const setSaveState = (text) => { $('#saveState').textContent = text; };
+
+async function putWorkspace(force = false) {
+  const body = JSON.stringify({ ...ws, baseRevision: force ? null : wsRevision });
+  const r = await api('/api/workspace', { method: 'PUT', body });
+  wsRevision = r.revision;
+  channel?.postMessage({ type: 'saved', revision: wsRevision });
+  return r;
 }
 
-function toast(msg) {
+async function doSave() {
+  if (saveInFlight) { await saveInFlight.catch(() => {}); }
+  saveInFlight = (async () => {
+    try {
+      await putWorkspace();
+      setSaveState('saved');
+    } catch (e) {
+      if (e.status === 409) await resolveConflict();
+      else {
+        setSaveState('save failed');
+        toast('Save failed. Is the RestDesk server running?');
+        console.error(e);
+      }
+    }
+  })();
+  try { await saveInFlight; } finally { saveInFlight = null; }
+}
+
+async function resolveConflict() {
+  setSaveState('conflict');
+  const takeTheirs = confirm('This workspace was changed in another RestDesk tab or window.\n\n' +
+    'OK: load the latest version (the edit you just made in this tab is discarded)\n' +
+    'Cancel: keep this tab\'s version and overwrite the other changes');
+  if (takeTheirs) { await reloadWorkspace(); toast('Loaded the latest version'); return; }
+  await putWorkspace(true);
+  setSaveState('saved');
+}
+
+/* Write pending changes now (before export, when the tab is hidden). */
+async function flushSave() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await doSave(); }
+  else if (saveInFlight) await saveInFlight.catch(() => {});
+}
+
+function save() {
+  clearTimeout(saveTimer);
+  setSaveState('saving…');
+  saveTimer = setTimeout(() => { saveTimer = null; doSave(); }, 350);
+}
+
+async function reloadWorkspace() {
+  const keep = currentId;
+  const data = await api('/api/workspace');
+  wsRevision = data.revision || 0;
+  delete data.revision;
+  ws = normalizeWorkspace(data);
+  renderEnvSelect();
+  if (findRequest(keep)) { currentId = keep; renderTree(); renderEditor(); } else renderAll();
+  setSaveState('saved');
+}
+
+channel?.addEventListener('message', ({ data }) => {
+  if (data?.type === 'saved' && data.revision > wsRevision && !hasPendingSave()) {
+    reloadWorkspace().catch(console.error);
+  }
+  if (data?.type === 'history') loadHistory();
+});
+
+/* toast('Saved') or toast('Deleted', { label: 'Undo', action: fn }) */
+function toast(msg, opt = {}) {
   let t = $('#toast');
-  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
   t.textContent = msg;
+  if (opt.action) {
+    const b = document.createElement('button');
+    b.className = 'toast-action';
+    b.textContent = opt.label || 'Undo';
+    b.onclick = () => { t.classList.remove('show'); opt.action(); };
+    t.appendChild(b);
+  }
   t.classList.add('show');
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.classList.remove('show'), 1600);
+  t._h = setTimeout(() => t.classList.remove('show'), opt.action ? 8000 : 1600);
 }
 
 /* ------------------------------------------------------------------ */
@@ -216,49 +281,24 @@ function buildFinal(req, vars) {
 /* ------------------------------------------------------------------ */
 /* Scripts: pre-request + tests                                        */
 /* ------------------------------------------------------------------ */
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const fmt = (v) => { try { return typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v) ?? String(v); } catch { return String(v); } };
+const SCRIPT_TIMEOUT_MS = 10000;
 
-function expect(actual) {
-  const fail = (msg) => { throw new Error(msg); };
-  const m = {
-    toBe: (e) => actual === e || fail(`expected ${fmt(actual)} to be ${fmt(e)}`),
-    toEqual: (e) => JSON.stringify(actual) === JSON.stringify(e) || fail(`expected ${fmt(actual)} to equal ${fmt(e)}`),
-    toBeTruthy: () => !!actual || fail(`expected ${fmt(actual)} to be truthy`),
-    toBeFalsy: () => !actual || fail(`expected ${fmt(actual)} to be falsy`),
-    toContain: (e) => (actual != null && actual.includes(e)) || fail(`expected ${fmt(actual)} to contain ${fmt(e)}`),
-    toMatch: (re) => new RegExp(re).test(String(actual)) || fail(`expected ${fmt(actual)} to match ${re}`),
-    toBeLessThan: (e) => actual < e || fail(`expected ${fmt(actual)} < ${fmt(e)}`),
-    toBeGreaterThan: (e) => actual > e || fail(`expected ${fmt(actual)} > ${fmt(e)}`),
-    toHaveProperty: (k) => (actual != null && k in Object(actual)) || fail(`expected object to have property ${fmt(k)}`),
-    toBeOneOf: (arr) => arr.includes(actual) || fail(`expected ${fmt(actual)} to be one of ${fmt(arr)}`),
-  };
-  m.not = Object.fromEntries(Object.entries(m).map(([name, fn]) => [name, (...args) => {
-    let passed = true;
-    try { fn(...args); } catch { passed = false; }
-    if (passed) throw new Error(`expected not ${name}(${args.map(fmt).join(', ')}) on ${fmt(actual)}`);
-  }]));
-  return m;
-}
-
-function makeEnvApi(vars, changes) {
-  return {
-    get: (k) => vars[k],
-    set: (k, v) => { vars[k] = v == null ? '' : String(v); changes[k] = vars[k]; },
-    unset: (k) => { delete vars[k]; changes[k] = undefined; },
-    all: () => ({ ...vars }),
-  };
-}
-
-function makeConsole(logs) {
-  const out = (lvl) => (...a) => logs.push(`${lvl ? lvl + ' ' : ''}${a.map((x) => typeof x === 'string' ? x : fmt(x)).join(' ')}`);
-  return { log: out(''), info: out(''), warn: out('[warn]'), error: out('[error]') };
-}
-
-async function runScript(code, ctx) {
-  if (!code || !code.trim()) return;
-  const fn = new AsyncFunction(...Object.keys(ctx), code);
-  await fn(...Object.values(ctx));
+/* Run a user script in the sandboxed worker (see sandbox-worker.js). Never throws:
+   returns {ok, error, vars, changes, req, tests, logs}. */
+function runScript(code, { vars, req = null, res = null, timeoutMs = SCRIPT_TIMEOUT_MS }) {
+  if (!code || !code.trim()) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let worker;
+    try { worker = new Worker('sandbox-worker.js'); } catch (e) {
+      resolve({ ok: false, error: `cannot start script sandbox: ${e.message}`, vars, changes: {}, req, tests: [], logs: [] });
+      return;
+    }
+    const done = (out) => { clearTimeout(timer); worker.terminate(); resolve(out); };
+    const timer = setTimeout(() => done({ ok: false, error: `script timed out after ${timeoutMs / 1000}s`, vars, changes: {}, req, tests: [], logs: [] }), timeoutMs);
+    worker.onmessage = (e) => done(e.data);
+    worker.onerror = (e) => { e.preventDefault(); done({ ok: false, error: e.message || 'script sandbox failed', vars, changes: {}, req, tests: [], logs: [] }); };
+    worker.postMessage({ code, vars: { ...vars }, req, res });
+  });
 }
 
 function applyEnvChanges(changes) {
@@ -266,49 +306,40 @@ function applyEnvChanges(changes) {
   if (!env || !Object.keys(changes).length) return;
   for (const [k, v] of Object.entries(changes)) {
     const i = env.vars.findIndex((x) => x.key === k);
-    if (v === undefined) { if (i >= 0) env.vars.splice(i, 1); }
+    if (v == null) { if (i >= 0) env.vars.splice(i, 1); }
     else if (i >= 0) env.vars[i].value = v;
     else env.vars.push(kv(k, v));
   }
 }
 
-function makeRes(r) {
-  const headers = {};
-  for (const [k, v] of r.headers || []) headers[k.toLowerCase()] = headers[k.toLowerCase()] ? headers[k.toLowerCase()] + ', ' + v : v;
-  let parsed;
-  return {
-    status: r.status, statusText: r.reason, headers, body: r.body, timeMs: r.timeMs, size: r.size, url: r.url,
-    header: (n) => headers[String(n).toLowerCase()],
-    json: () => { if (parsed === undefined) parsed = JSON.parse(r.body); return parsed; },
-  };
-}
-
 /* Execute one request end-to-end (no UI). Used by Send and by collection runs. */
 async function execute(req) {
-  const vars = envObject();
+  let vars = envObject();
   const changes = {};
   const logs = [];
   const tests = [];
-  const env = makeEnvApi(vars, changes);
-  const console = makeConsole(logs);
-  const draft = clone(req);
-  draft.setHeader = (k, v) => {
-    const h = draft.headers.find((x) => x.key.toLowerCase() === String(k).toLowerCase());
-    if (h) { h.value = String(v); h.enabled = true; } else draft.headers.push(kv(String(k), String(v)));
+  const timeoutMs = Number(req.settings?.scriptTimeoutMs) || SCRIPT_TIMEOUT_MS;
+  const result = { req, final: null, response: null, tests, logs, error: null };
+  const absorb = (out) => {
+    if (!out) return;
+    Object.assign(changes, out.changes || {});
+    logs.push(...(out.logs || []));
+    if (out.vars) vars = out.vars;
   };
 
-  const result = { req, final: null, response: null, tests, logs, error: null };
-  try {
-    await runScript(req.scripts?.pre, { env, req: draft, console });
-  } catch (e) {
-    result.error = `Pre-request script error: ${e.message}`;
+  let draft = clone(req);
+  const pre = await runScript(req.scripts?.pre, { vars, req: draft, timeoutMs });
+  absorb(pre);
+  if (pre && !pre.ok) {
+    result.error = `Pre-request script error: ${pre.error}`;
     applyEnvChanges(changes);
     return result;
   }
+  if (pre?.req) draft = pre.req;
 
   const final = buildFinal(draft, vars);
   result.final = final;
-  if (!final.url) { result.error = 'URL is empty'; return result; }
+  if (!final.url) { result.error = 'URL is empty'; applyEnvChanges(changes); return result; }
 
   try {
     result.response = await api('/api/send', {
@@ -317,24 +348,16 @@ async function execute(req) {
     });
   } catch (e) {
     result.error = `RestDesk server unreachable: ${e.message}`;
+    applyEnvChanges(changes);
     return result;
   }
   if (!result.response.ok) { result.error = result.response.error; applyEnvChanges(changes); return result; }
 
-  const res = makeRes(result.response);
-  const pending = [];
-  const test = (name, fn) => {
-    pending.push((async () => {
-      try { await fn(); tests.push({ name, pass: true }); }
-      catch (e) { tests.push({ name, pass: false, msg: e.message }); }
-    })());
-  };
-  try {
-    await runScript(req.scripts?.post, { env, req: draft, res, test, expect, console });
-    await Promise.all(pending);
-  } catch (e) {
-    await Promise.all(pending);
-    tests.push({ name: 'script', pass: false, msg: `Script error: ${e.message}` });
+  const post = await runScript(req.scripts?.post, { vars, req: draft, res: result.response, timeoutMs });
+  absorb(post);
+  if (post) {
+    tests.push(...(post.tests || []));
+    if (!post.ok) tests.push({ name: 'script', pass: false, msg: `Script error: ${post.error}` });
   }
   applyEnvChanges(changes);
   return result;
@@ -443,6 +466,10 @@ function renderBody() {
   const res = r.response;
   const ctype = (res.headers.find(([k]) => k.toLowerCase() === 'content-type') || [, ''])[1].toLowerCase();
 
+  if (res.bodyNotStored) {
+    el.innerHTML = `<span class="muted">This ${fmtSize(res.size)} binary body was not kept in history (over the 2 MB storage limit).</span>`;
+    return;
+  }
   if (res.bodyEncoding === 'base64') {
     if (ctype.startsWith('image/')) el.innerHTML = `<img alt="response image" src="data:${esc(ctype.split(';')[0])};base64,${res.body}">`;
     else el.innerHTML = `<span class="muted">Binary response (${fmtSize(res.size)}, ${esc(ctype || 'unknown type')}) — not shown.</span>`;
@@ -547,11 +574,14 @@ function renderTree() {
       if (a === 'add') { addRequest(col); return; }
       if (a === 'ren') { const n = prompt('Collection name', col.name); if (n) { col.name = n; save(); renderTree(); } return; }
       if (a === 'del') {
-        if (confirm(`Delete collection "${col.name}" and its ${col.requests.length} request(s)?`)) {
-          ws.collections.splice(ws.collections.indexOf(col), 1);
-          if (!findRequest(currentId)) selectRequest(ws.collections[0]?.requests[0]?.id || null);
+        const at = ws.collections.indexOf(col);
+        ws.collections.splice(at, 1);
+        if (!findRequest(currentId)) selectRequest(ws.collections[0]?.requests[0]?.id || null);
+        save(); renderTree();
+        toast(`Deleted collection "${col.name}"`, { label: 'Undo', action: () => {
+          ws.collections.splice(Math.min(at, ws.collections.length), 0, col);
           save(); renderTree();
-        }
+        } });
         return;
       }
       col.collapsed = !col.collapsed; save(); renderTree();
@@ -573,10 +603,17 @@ function renderTree() {
           selectRequest(copy.id); save(); return;
         }
         if (a === 'del') {
-          if (!confirm(`Delete request "${r.name}"?`)) return;
-          col.requests.splice(col.requests.indexOf(r), 1);
+          const at = col.requests.indexOf(r);
+          col.requests.splice(at, 1);
           if (r.id === currentId) selectRequest(col.requests[0]?.id || ws.collections.find((c) => c.requests.length)?.requests[0]?.id || null);
-          save(); renderTree(); return;
+          save(); renderTree();
+          toast(`Deleted "${r.name}"`, { label: 'Undo', action: () => {
+            const home = ws.collections.includes(col) ? col : (ws.collections[0] || null);
+            if (!home) { toast('Restore it from Trash instead'); return; }
+            home.requests.splice(Math.min(at, home.requests.length), 0, r);
+            selectRequest(r.id); save();
+          } });
+          return;
         }
         selectRequest(r.id);
       };
@@ -597,6 +634,7 @@ async function recordHistory(req, result, source) {
     const row = await api('/api/history', { method: 'POST', body: JSON.stringify(historyRecord(req, result, source)) });
     if (!hist.q) { hist.items.unshift(row); hist.total++; renderHistory(); }
     else loadHistory();
+    channel?.postMessage({ type: 'history' });
   } catch (e) { console.error(e); toast('Could not save to history'); }
 }
 
@@ -640,6 +678,10 @@ async function openHistory(id) {
   lastResult = { req: target, tests: [], logs: [], ...entry.result };
   lastResult.final ||= { url: entry.url, method: entry.method };
   renderResponse();
+  const notes = [];
+  if (entry.result?.redacted) notes.push('secrets redacted');
+  if (entry.result?.response?.storedTruncated) notes.push('body clipped to 2 MB');
+  if (notes.length) $('#statusLine').insertAdjacentHTML('beforeend', `<span class="note" title="Stored copy, not the live response">${esc(notes.join(' · '))}</span>`);
   $('#statusLine').insertAdjacentHTML('beforeend',
     `<span class="muted" title="${esc(entry.method)} ${esc(entry.url)}">· from history: ${esc(entry.method)} ${esc(entry.url.replace(/^https?:\/\//, ''))} · ${esc(new Date(entry.ts).toLocaleString())}</span>`);
 }
@@ -677,6 +719,54 @@ function renderHistory() {
     el.appendChild(more);
   }
   $('#histCount').textContent = hist.total ? hist.total : '';
+}
+
+/* Trash: deleted collections/requests, kept server-side for 30 days. */
+async function openTrash() {
+  const dlg = $('#trashDialog');
+  const table = $('#trashTable');
+  table.innerHTML = '<tr><td class="muted">Loading…</td></tr>';
+  if (!dlg.open) dlg.showModal();
+  await flushSave();
+  let items = [];
+  try { ({ items } = await api('/api/trash')); } catch (e) { table.innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; return; }
+  if (!items.length) { table.innerHTML = '<tr><td class="muted">Trash is empty.</td></tr>'; return; }
+  table.innerHTML = '<tr><th>Item</th><th>From</th><th>Deleted</th><th></th></tr>';
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    const what = it.kind === 'collection'
+      ? `<b>${esc(it.name)}</b> <span class="muted">collection · ${it.requestCount} request(s)</span>`
+      : `<span class="m m-${esc(it.method || 'GET')}">${esc(it.method || '')}</span> ${esc(it.name)}`;
+    tr.innerHTML = `<td>${what}</td><td>${esc(it.collectionName || '')}</td><td>${esc(new Date(it.deletedAt).toLocaleString())}</td>` +
+      '<td><button class="small">Restore</button></td>';
+    $('button', tr).onclick = () => restoreFromTrash(it.id);
+    table.appendChild(tr);
+  }
+}
+
+async function restoreFromTrash(id) {
+  let item;
+  try { item = await api(`/api/trash/${encodeURIComponent(id)}/restore`, { method: 'POST', body: '{}' }); }
+  catch (e) { toast(`Restore failed: ${e.message}`); return; }
+  const taken = (rid) => !!findRequest(rid);
+  if (item.kind === 'collection') {
+    const col = item.data;
+    if (ws.collections.some((c) => c.id === col.id)) col.id = uid();
+    col.requests = (col.requests || []).map((r) => (taken(r.id) ? { ...r, id: uid() } : r));
+    ws.collections.push(col);
+    toast(`Restored collection "${col.name}"`);
+  } else {
+    const req = taken(item.data.id) ? { ...item.data, id: uid() } : item.data;
+    let col = ws.collections.find((c) => c.id === item.collectionId)
+      || ws.collections.find((c) => c.name === item.collectionName);
+    if (!col) { col = { id: uid(), name: item.collectionName || 'Restored', collapsed: false, requests: [] }; ws.collections.push(col); }
+    col.requests.push(req);
+    col.collapsed = false;
+    selectRequest(req.id);
+    toast(`Restored "${req.name}" into ${col.name}`);
+  }
+  save(); renderTree();
+  openTrash();
 }
 
 function addRequest(col, req = newRequest()) {
@@ -729,6 +819,7 @@ function renderEditor() {
   $('#preScript').value = req.scripts.pre || '';
   $('#postScript').value = req.scripts.post || '';
   $('#setTimeout').value = req.settings.timeoutMs;
+  $('#setScriptTimeout').value = req.settings.scriptTimeoutMs || '';
   $('#setFollow').checked = req.settings.followRedirects !== false;
   $('#setVerify').checked = req.settings.verifyTls !== false;
   updateResolvedPreview();
@@ -1024,6 +1115,7 @@ function bind() {
   onReq('#preScript', 'input', (r, e) => { r.scripts.pre = e.target.value; });
   onReq('#postScript', 'input', (r, e) => { r.scripts.post = e.target.value; });
   onReq('#setTimeout', 'input', (r, e) => { r.settings.timeoutMs = parseInt(e.target.value, 10) || 30000; });
+  onReq('#setScriptTimeout', 'input', (r, e) => { const v = parseInt(e.target.value, 10); if (v > 0) r.settings.scriptTimeoutMs = v; else delete r.settings.scriptTimeoutMs; });
   onReq('#setFollow', 'change', (r, e) => { r.settings.followRedirects = e.target.checked; });
   onReq('#setVerify', 'change', (r, e) => { r.settings.verifyTls = e.target.checked; });
 
@@ -1114,6 +1206,12 @@ function bind() {
   $('#envDialog').addEventListener('close', () => { renderEnvSelect(); updateResolvedPreview(); });
 
   $('#btnRunCol').onclick = runCollection;
+  $('#btnTrash').onclick = openTrash;
+  $('#btnEmptyTrash').onclick = async () => {
+    if (!confirm('Permanently delete everything in the trash?')) return;
+    await api('/api/trash', { method: 'DELETE' });
+    openTrash();
+  };
   $$('[data-close]').forEach((b) => { b.onclick = () => b.closest('dialog').close(); });
 
   $('#btnExport').onclick = async () => {
@@ -1166,20 +1264,41 @@ function renderAll() {
 
 async function init() {
   bind();
+  let fresh = false;
   try {
-    ws = normalizeWorkspace(await api('/api/workspace'));
+    const data = await api('/api/workspace');
+    wsRevision = data.revision || 0;
+    delete data.revision;
+    fresh = !Array.isArray(data.collections);
+    ws = normalizeWorkspace(data);
   } catch (e) {
     document.body.innerHTML = `<p style="padding:20px">Cannot reach the RestDesk server: ${esc(e.message)}.<br>Start it with <code>uv run restdesk</code>.</p>`;
     return;
   }
   renderAll();
   loadHistory();
-  save();
+  if (fresh) save(); // first run: persist the example workspace
   try {
     const info = await api('/api/info');
     $('#saveState').title = `Stored in ${info.dataPath}`;
   } catch { /* older server */ }
-  window.addEventListener('beforeunload', () => { if (saveTimer) flushSave(true); });
+
+  // Save as soon as the tab is hidden (switching tabs, minimising, closing on mobile).
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
+  window.addEventListener('beforeunload', (e) => {
+    if (!hasPendingSave()) return;
+    const body = JSON.stringify({ ...ws, baseRevision: wsRevision });
+    if (!saveInFlight && body.length < KEEPALIVE_LIMIT) {
+      clearTimeout(saveTimer); saveTimer = null;
+      // keepalive lets this small PUT finish while the page unloads
+      fetch('/api/workspace', { method: 'PUT', body, keepalive: true, headers: { 'Content-Type': 'application/json', 'X-RestDesk': '1' } });
+      return;
+    }
+    // Too big for keepalive (or a save is still running): ask the browser to confirm leaving.
+    flushSave();
+    e.preventDefault();
+    e.returnValue = '';
+  });
 }
 
 init();

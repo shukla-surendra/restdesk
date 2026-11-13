@@ -1,7 +1,23 @@
 # Scripting
 
-Each request has two optional scripts in its **Scripts** tab. They are plain JavaScript and run in
-your browser tab. They can be `async`, so `await` works.
+Each request has two optional scripts in its **Scripts** tab. They are plain JavaScript and can be
+`async`, so `await` works.
+
+## The sandbox
+
+Scripts don't run in the RestDesk page. Each one runs in a fresh **Web Worker** that:
+
+- can see only `env`, `req`, `res`, `test`, `expect` and `console`, with no access to the page, your
+  other requests, environments or history;
+- has **no network access**. `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource` and
+  `importScripts` are blocked by the worker's Content-Security-Policy and also removed;
+- is **stopped after a time limit** (10 s by default, set per request in *Settings → Script time
+  limit*). A runaway `while (true) {}` fails that request with *script timed out* and the app keeps
+  working.
+
+So a collection someone sends you can compute, set variables and assert, but it can't read or send
+your data elsewhere. A script can still put data into a `{{variable}}` that a request then sends, so
+review a collection's URLs, headers and bodies before running it.
 
 ## Pre-request script
 This script runs **before** `{{variables}}` are resolved:
@@ -53,4 +69,4 @@ Then set later requests' auth to **Bearer** with the token `{{token}}`.
 
 - `console.log()` output shows up in the response's **Tests** tab.
 - A script that throws marks the run as failed and shows the error, and the request is still recorded in history.
-- Scripts have full browser JS access. Only run collections from people you trust.
+- `env.unset('name')` removes a variable from the active environment.

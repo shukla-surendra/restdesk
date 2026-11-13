@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import __version__
-from .storage import Store
+from .storage import Conflict, SchemaTooNew, Store
 
 VERSION = __version__
 STATIC = Path(__file__).resolve().parent / "static"
@@ -40,6 +40,15 @@ CONTENT_TYPES = {
     ".svg": "image/svg+xml",
 }
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+# The UI page may only talk to this server and run its own files (no inline/remote script).
+PAGE_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; worker-src 'self'; frame-src 'none'; "
+            "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+# User scripts run in this worker. A worker obeys the CSP sent with its own script, so this
+# leaves it able to compute (eval) but not to make network requests or load more code.
+SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-eval'"
+SANDBOX_FILE = "sandbox-worker.js"
 
 
 def default_data_path() -> Path:
@@ -171,6 +180,8 @@ def make_handler(store: Store):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -220,7 +231,11 @@ def make_handler(store: Store):
                     return self._send(200, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
                 if path == "/api/info":
                     return self._send(200, {"version": VERSION, "dataPath": str(store.path),
-                                            "historyLimit": store.history_limit})
+                                            "historyLimit": store.history_limit,
+                                            "redactHistory": store.redact_history,
+                                            "schemaVersion": store.schema_version})
+                if path == "/api/trash":
+                    return self._send(200, {"items": store.list_trash()})
                 return self._send(404, {"error": "not found"})
             if path in ("/", "/index.html"):
                 path = "/index.html"
@@ -228,17 +243,24 @@ def make_handler(store: Store):
             if STATIC not in target.parents or not target.is_file():
                 return self._send(404, {"error": "not found"})
             ctype = CONTENT_TYPES.get(target.suffix, "application/octet-stream")
-            return self._send(200, target.read_bytes(), ctype)
+            csp = SANDBOX_CSP if target.name == SANDBOX_FILE else PAGE_CSP
+            return self._send(200, target.read_bytes(), ctype, {"Content-Security-Policy": csp})
 
         def do_PUT(self):
             path, _ = self._route()
             if path != "/api/workspace" or not self._api_ok():
                 return self._send(403, {"error": "forbidden"})
             try:
-                store.save_workspace(self._read_json())
+                ws = self._read_json()
+                base = ws.pop("baseRevision", None) if isinstance(ws, dict) else None
+                if isinstance(ws, dict):
+                    ws.pop("revision", None)
+                revision = store.save_workspace(ws, base_revision=base)
+            except Conflict as exc:
+                return self._send(409, {"error": "conflict", "revision": exc.revision})
             except Exception as exc:
                 return self._send(400, {"error": str(exc)})
-            return self._send(200, {"saved": True})
+            return self._send(200, {"saved": True, "revision": revision})
 
         def do_POST(self):
             path, _ = self._route()
@@ -255,6 +277,9 @@ def make_handler(store: Store):
                     return self._send(200, store.add_history(payload))
                 except Exception as exc:
                     return self._send(400, {"error": str(exc)})
+            if path.startswith("/api/trash/") and path.endswith("/restore"):
+                item = store.take_from_trash(path.split("/")[3])
+                return self._send(200, item) if item else self._send(404, {"error": "not found"})
             return self._send(404, {"error": "not found"})
 
         def do_DELETE(self):
@@ -265,6 +290,8 @@ def make_handler(store: Store):
                 return self._send(200, {"deleted": store.delete_history()})
             if path.startswith("/api/history/"):
                 return self._send(200, {"deleted": store.delete_history(path.rsplit("/", 1)[1])})
+            if path == "/api/trash":
+                return self._send(200, {"deleted": store.empty_trash()})
             return self._send(404, {"error": "not found"})
 
     return Handler
@@ -293,6 +320,9 @@ def main(argv=None) -> int:
                     help="SQLite database file (collections, environments, call history)")
     ap.add_argument("--history-limit", type=int, default=int(os.environ.get("RESTDESK_HISTORY_LIMIT", 2000)),
                     help="number of calls to keep in history (0 = unlimited, default 2000)")
+    ap.add_argument("--keep-secrets-in-history", action="store_true",
+                    default=os.environ.get("RESTDESK_KEEP_SECRETS") == "1",
+                    help="store tokens/passwords in call history unmasked (default: redact them)")
     ap.add_argument("--import-json", metavar="FILE",
                     help="import a RestDesk 0.1 workspace.json into an empty database")
     ap.add_argument("--export", metavar="FILE",
@@ -301,7 +331,12 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     data_path = Path(args.data).expanduser().resolve()
-    store = Store(data_path, history_limit=max(0, args.history_limit))
+    try:
+        store = Store(data_path, history_limit=max(0, args.history_limit),
+                      redact_history=not args.keep_secrets_in_history)
+    except SchemaTooNew as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if args.export:
         Path(args.export).expanduser().write_text(

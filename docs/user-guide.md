@@ -18,6 +18,7 @@ behind it sends the real HTTP calls, so browser CORS rules don't apply.
 - **＋** (next to the logo) creates a collection. Hover a collection for *add request*, *rename*,
   *delete*, or run it with **Run collection**.
 - Hover a request to duplicate or delete it. **Filter requests…** searches names and URLs.
+- Deleting shows an **Undo** button. Deleted items also go to **Trash** (sidebar footer) for 30 days.
 - Everything autosaves. The bottom-left corner shows `saving…` / `saved`, and **⌘/Ctrl+S** saves at once.
 
 ### URL and params
@@ -45,8 +46,8 @@ Bearer token, Basic (user/password) or API key (as a header or query param). Eac
 
 ### Settings
 
-Per request: timeout, follow redirects, and verify TLS certificates. Turn TLS checks off for
-self-signed dev certificates.
+Per request: timeout, follow redirects, verify TLS certificates (turn off for self-signed dev
+certificates), and the script time limit (default 10 s).
 
 ## Environments
 
@@ -79,6 +80,8 @@ first, with method, URL, age and status.
   since, the snapshot is restored into a `History` collection so the editor matches the response.
 - **×** on hover deletes one entry, and **clear** deletes all of them.
 - **Load more** pages through older entries.
+- Tokens, passwords, cookies and API keys are **redacted** in stored calls. The status line says
+  *secrets redacted* when you open one. See [storage.md](storage.md#secret-redaction).
 
 ![History](screenshots/history.png)
 

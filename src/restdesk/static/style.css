@@ -159,3 +159,10 @@ textarea.code.short { min-height: 110px; flex: none; margin-bottom: 10px; }
 #histFilter { margin-top: 2px; }
 .status-line > * { white-space: nowrap; flex: none; }
 .status-line > .muted:last-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* toast actions, history notes, trash */
+#toast.show { pointer-events: auto; }
+#toast .toast-action { margin-left: 12px; background: none; border: none; color: inherit; text-decoration: underline; font-weight: 600; cursor: pointer; padding: 0; }
+.status-line .note { color: var(--warn); font-size: 11px; }
+#trashTable td { vertical-align: middle; }
+#trashTable .m { display: inline-block; }

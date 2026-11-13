@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -18,4 +18,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv run --python ${{ matrix.python }} pytest -q
+      - run: uv run --python ${{ matrix.python }} pytest -q -m "not e2e"
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest -q tests/e2e

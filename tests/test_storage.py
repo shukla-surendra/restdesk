@@ -38,7 +38,7 @@ def store(tmp_path):
 
 def test_new_db_is_empty(store):
     assert store.is_empty()
-    assert store.load_workspace() == {}
+    assert store.load_workspace() == {"revision": 0}
 
 
 def test_workspace_roundtrip_and_survives_reopen(tmp_path):
@@ -97,7 +97,7 @@ def test_history_add_list_get_search_delete(store):
 
 
 def test_history_limit_and_body_clipping(tmp_path):
-    s = Store(tmp_path / "rd.db", history_limit=3, max_stored_body=10)
+    s = Store(tmp_path / "rd.db", history_limit=3, max_stored_body=10, redact_history=False)
     for i in range(5):
         s.add_history({"ts": i, "snapshot": {}, "result": result(body="x" * 50)})
     items = s.list_history()["items"]
@@ -135,7 +135,7 @@ def test_http_api(store):
 
     try:
         assert call("GET", "/api/workspace", header=False)[0] == 403
-        assert call("PUT", "/api/workspace", workspace()) == (200, {"saved": True})
+        assert call("PUT", "/api/workspace", workspace()) == (200, {"saved": True, "revision": 1})
         assert call("GET", "/api/workspace")[1]["collections"][0]["name"] == "Users"
         code, row = call("POST", "/api/history", {"snapshot": {"id": "r1"}, "result": result()})
         assert code == 200 and row["status"] == "200"

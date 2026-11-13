@@ -23,6 +23,7 @@
     <div class="side-foot">
       <button id="btnExport" class="link">Export</button>
       <button id="btnImport" class="link">Import</button>
+      <button id="btnTrash" class="link">Trash</button>
       <input id="fileImport" type="file" accept=".json,application/json" hidden>
       <span id="saveState"></span>
     </div>
@@ -98,6 +99,7 @@
             <label>Timeout (ms)</label><input id="setTimeout" type="number" min="100" step="100">
             <label>Follow redirects</label><input id="setFollow" type="checkbox">
             <label>Verify TLS certificates</label><input id="setVerify" type="checkbox">
+            <label>Script time limit (ms)</label><input id="setScriptTimeout" type="number" min="100" step="500" placeholder="10000">
           </div>
         </div>
       </section>
@@ -144,6 +146,13 @@
   <div class="dlg-head"><b>Import cURL</b><button class="icon" data-close>✕</button></div>
   <textarea id="curlText" class="code" spellcheck="false" placeholder="curl -X POST https://api.example.com/items -H 'Content-Type: application/json' -d '{&quot;a&quot;:1}'"></textarea>
   <div class="row end"><button id="btnDoCurl" class="primary">Import as new request</button></div>
+</dialog>
+
+<dialog id="trashDialog" class="dlg wide">
+  <div class="dlg-head"><b>Trash</b><button class="icon" data-close>✕</button></div>
+  <p class="muted" style="margin:0 0 10px">Deleted collections and requests are kept here for 30 days.</p>
+  <table id="trashTable" class="hdr-table"></table>
+  <div class="row end"><button id="btnEmptyTrash" class="small danger">Empty trash</button></div>
 </dialog>
 
 <dialog id="runDialog" class="dlg wide">
