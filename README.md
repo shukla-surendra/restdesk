@@ -31,6 +31,17 @@ uv run restdesk
 Options: `--port 9000`, `--data ./my.db`, `--history-limit 5000`, `--no-browser`,
 `--export backup.json`, `--keep-secrets-in-history`. Run `restdesk --help` for the full list.
 
+### Coding agents (MCP)
+
+Let Claude Code, Cursor, VS Code or Codex build your collections, login flows and environments
+for you. They appear in the open RestDesk window as the agent works:
+
+```bash
+claude mcp add restdesk --scope user -- restdesk mcp
+```
+
+See [docs/agents.md](docs/agents.md) for other agents and how it stays safe with the app open.
+
 ### Desktop app
 
 RestDesk also ships as an Electron desktop app (macOS, Windows, Linux) that bundles the server, so
@@ -57,6 +68,7 @@ calls don't come from the page, the browser's **CORS** limits don't apply, so yo
 | History | Every call saved with its resolved request, full response, timing and test results, **with secrets redacted**. Search it, page through it, and click an entry to see the stored response again |
 | Storage | One SQLite database, written in transactions, with schema migrations. Conflict-safe across tabs, Undo and a 30-day Trash for deletes, JSON export/import |
 | Script sandbox | Scripts run in an isolated Web Worker with no network access and a time limit, so shared collections can't read your data |
+| Coding agents | Built-in MCP server (`restdesk mcp`): agents create and edit collections, requests and environments, and read history. Changes show up live, and deletes go to Trash |
 | cURL | Import (Chrome/Firefox "Copy as cURL", `$'…'`, `-d`, `-F`, `-u`, `--json`, `-G`, …) and export |
 | Per request | Timeout, follow redirects, verify TLS (for self-signed dev certs) |
 
@@ -77,6 +89,7 @@ Dark mode follows your OS setting:
 - [User guide](docs/user-guide.md): requests, environments, responses, history, runner, cURL, shortcuts
 - [Scripting](docs/scripting.md): pre-request and test scripts, `env`, `req`, `res`, `expect`
 - [Storage and history](docs/storage.md): where data lives, what is stored, limits, backups, upgrading from 0.1
+- [Coding agents (MCP)](docs/agents.md): let Claude Code, Cursor, VS Code or Codex set up requests for you
 - [Local HTTP API](docs/http-api.md): endpoints the UI uses, for your own tooling
 - [Development](docs/development.md): uv setup, tests, layout, contributing
 - [Changelog](CHANGELOG.md)

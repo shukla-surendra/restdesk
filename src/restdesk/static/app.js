@@ -80,7 +80,7 @@ async function doSave() {
 
 async function resolveConflict() {
   setSaveState('conflict');
-  const takeTheirs = confirm('This workspace was changed in another RestDesk tab or window.\n\n' +
+  const takeTheirs = confirm('This workspace was changed in another RestDesk tab or window, or by a coding agent.\n\n' +
     'OK: load the latest version (the edit you just made in this tab is discarded)\n' +
     'Cancel: keep this tab\'s version and overwrite the other changes');
   if (takeTheirs) { await reloadWorkspace(); toast('Loaded the latest version'); return; }
@@ -117,6 +117,25 @@ channel?.addEventListener('message', ({ data }) => {
   }
   if (data?.type === 'history') loadHistory();
 });
+
+/* Other processes write to the database too (`restdesk mcp`, used by coding agents, or a
+   second app). They can't use the BroadcastChannel, so while the tab is visible we ask the
+   server for the revision now and then and reload when it moved on. */
+const REVISION_POLL_MS = 2000;
+async function checkExternalChanges() {
+  if (document.hidden || hasPendingSave()) return;
+  try {
+    const { revision } = await api('/api/revision');
+    if (revision > wsRevision && !hasPendingSave()) {
+      await reloadWorkspace();
+      toast('Workspace updated outside this window');
+    }
+  } catch { /* older server or server stopped: the next save reports it */ }
+}
+function watchExternalChanges() {
+  setInterval(checkExternalChanges, REVISION_POLL_MS);
+  window.addEventListener('focus', checkExternalChanges);
+}
 
 /* In-page replacement for window.prompt (which Electron doesn't support).
    Resolves to the entered text, or null when cancelled. */
@@ -1683,6 +1702,7 @@ async function init() {
   renderAll();
   loadHistory();
   if (fresh) save(); // first run: persist the example workspace
+  watchExternalChanges();
   try {
     const info = await api('/api/info');
     $('#saveState').title = `Stored in ${info.dataPath}`;

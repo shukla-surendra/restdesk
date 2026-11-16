@@ -2,6 +2,7 @@
 
 Run:  uv run restdesk                 (opens http://127.0.0.1:8787)
       uv run restdesk --port 9000 --data ./my-restdesk.db --no-browser
+      uv run restdesk mcp              (MCP server on stdio, for coding agents)
 
 The browser UI talks to this process, which performs the real HTTP calls.
 That avoids CORS limits and lets you hit any API (localhost, internal, public).
@@ -220,6 +221,8 @@ def make_handler(store: Store):
                 one = lambda k, d="": (qs.get(k) or [d])[0]  # noqa: E731
                 if path == "/api/workspace":
                     return self._send(200, store.load_workspace())
+                if path == "/api/revision":  # cheap poll: did another process (an agent) save?
+                    return self._send(200, {"revision": store.revision()})
                 if path == "/api/history":
                     return self._send(200, store.list_history(
                         limit=int(one("limit", "100") or 100), offset=int(one("offset", "0") or 0),
@@ -312,7 +315,12 @@ def _migrate_legacy(store: Store, explicit: str | None) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="restdesk", description="RestDesk - lightweight local REST client")
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["mcp"]:  # `restdesk mcp`: MCP server on stdio for coding agents
+        from .mcp import main as mcp_main
+        return mcp_main(argv[1:])
+    ap = argparse.ArgumentParser(prog="restdesk", description="RestDesk - lightweight local REST client",
+                                 epilog="`restdesk mcp --help`: MCP server for coding agents (see docs/agents.md)")
     ap.add_argument("--version", action="version", version=f"RestDesk {VERSION}")
     ap.add_argument("--port", type=int, default=int(os.environ.get("RESTDESK_PORT", 8787)),
                     help="port to listen on (0 = pick a free one)")

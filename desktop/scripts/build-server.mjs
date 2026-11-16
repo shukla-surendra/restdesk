@@ -13,6 +13,7 @@ const r = spawnSync('uv', [
   'pyinstaller', '--noconfirm', '--clean', '--onedir', '--console',
   '--name', 'restdesk-server',
   '--collect-data', 'restdesk',
+  '--hidden-import', 'restdesk.mcp', // `restdesk-server mcp` (imported lazily)
   '--distpath', path.join(build, 'server-dist'),
   '--workpath', path.join(build, 'pyinstaller'),
   '--specpath', build,

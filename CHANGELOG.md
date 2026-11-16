@@ -8,6 +8,13 @@
   arrives after you switch away is shown on the request that sent it, not the one now open.
 
 ### Added
+- **Coding agents (MCP).** `restdesk mcp` runs an MCP server on stdio, with no extra dependencies, so
+  Claude Code, Cursor, VS Code, Codex and others can create and edit collections, requests and
+  environments, and read call history. Writes are revision-checked and retried on top of
+  concurrent UI saves, deletes go to the Trash, and secret-looking variables are masked. The
+  desktop app's bundled server supports it too. See [docs/agents.md](docs/agents.md).
+- The UI notices changes made by other processes (polls the new `GET /api/revision` every 2 s
+  while visible, and on focus) and reloads, instead of hitting a conflict on the next edit.
 - **Use one response in another request.** `{{@Login.body.access_token}}`, `{{@Login.header.Location}}`
   and `{{@Login.status}}` read another request's last response (this session, else history), in
   URLs, params, headers, bodies, auth and env variables. `??` adds fallbacks in any order:

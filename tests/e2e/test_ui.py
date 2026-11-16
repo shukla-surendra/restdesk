@@ -203,6 +203,7 @@ def test_other_tab_saves_are_picked_up(browser, app):
 def test_stale_tab_gets_conflict_prompt_instead_of_overwriting(browser, app):
     store, url = app
     page = open_page(browser, url)
+    page.route("**/api/revision", lambda route: route.abort())  # the tab can't notice the change first
     # someone else saves behind this tab's back (no broadcast reaches it)
     ws = store.load_workspace()
     ws["collections"][0]["requests"].append(req("r9", "Added elsewhere", "http://x"))
@@ -215,6 +216,28 @@ def test_stale_tab_gets_conflict_prompt_instead_of_overwriting(browser, app):
     assert messages and "changed in another" in messages[0]
     names = [r["name"] for r in store.load_workspace()["collections"][0]["requests"]]
     assert "Added elsewhere" in names
+
+
+def test_changes_from_an_agent_show_up_in_an_open_window(browser, app):
+    from restdesk.mcp import Tools
+    store, url = app
+    page = open_page(browser, url)
+    Tools(store).save_request({"collection": "Suite", "request": {"name": "Added by agent", "url": "http://x"}})
+    page.wait_for_selector(".req-row:has-text('Added by agent')", timeout=6000)
+    expect(page.locator("#toast")).to_contain_text("updated outside")
+    # the tab is in sync again, so its next edit saves without a conflict prompt
+    messages = []
+    page.on("dialog", lambda d: (messages.append(d.message), d.dismiss()))
+    page.locator(".req-row", has_text="Get item").click()
+    page.fill("#reqName", "Edited after agent")
+    deadline = time.time() + 5
+    while True:
+        names = [r["name"] for r in store.load_workspace()["collections"][0]["requests"]]
+        if "Edited after agent" in names or time.time() > deadline:
+            break
+        time.sleep(0.1)
+    assert "Edited after agent" in names and "Added by agent" in names and not messages
+    assert not page.errors
 
 
 def test_edit_survives_closing_the_tab_right_away(browser, app):
