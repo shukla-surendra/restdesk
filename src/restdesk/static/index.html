@@ -148,6 +148,14 @@
   <div class="row end"><button id="btnDoCurl" class="primary">Import as new request</button></div>
 </dialog>
 
+<dialog id="askDialog" class="dlg narrow">
+  <form method="dialog">
+    <div class="dlg-head"><b id="askTitle"></b><button class="icon" value="" formnovalidate>✕</button></div>
+    <input id="askInput" spellcheck="false" autocomplete="off">
+    <div class="row end"><button value="" formnovalidate>Cancel</button><button id="askOk" class="primary" value="ok">OK</button></div>
+  </form>
+</dialog>
+
 <dialog id="trashDialog" class="dlg wide">
   <div class="dlg-head"><b>Trash</b><button class="icon" data-close>✕</button></div>
   <p class="muted" style="margin:0 0 10px">Deleted collections and requests are kept here for 30 days.</p>

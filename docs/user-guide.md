@@ -18,6 +18,10 @@ behind it sends the real HTTP calls, so browser CORS rules don't apply.
 - **＋** (next to the logo) creates a collection. Hover a collection for *add request*, *rename*,
   *delete*, or run it with **Run collection**.
 - Hover a request to duplicate or delete it. **Filter requests…** searches names and URLs.
+- Drag requests to reorder them, or drop one on a collection header to move it there. Collections
+  can be dragged too. (Dragging is off while the filter is in use.)
+- Each request keeps its last response when you switch away and back. After a restart, its most
+  recent call is loaded from history (marked *last call*).
 - Deleting shows an **Undo** button. Deleted items also go to **Trash** (sidebar footer) for 30 days.
 - Everything autosaves. The bottom-left corner shows `saving…` / `saved`, and **⌘/Ctrl+S** saves at once.
 
@@ -114,6 +118,7 @@ and shows a pass/fail table. Closing the dialog stops the run. Each call is also
 |---|---|
 | ⌘/Ctrl + Enter | Send |
 | ⌘/Ctrl + S | Save now |
+| Alt + Shift + ↑ / ↓ | Move the selected request up / down |
 | Tab | Indent in code boxes |
 
 ## Dark mode

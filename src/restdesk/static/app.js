@@ -11,7 +11,10 @@ const HISTORY_PAGE = 100;
 
 let ws = null;            // the whole workspace (persisted to disk by the server)
 let currentId = null;     // id of the request being edited
-let lastResult = null;    // last execution result for the response pane
+let lastResult = null;    // result shown in the response pane
+const results = new Map(); // request id -> { result, note }: last response per request (survives switching)
+let selectSeq = 0;        // bumps on every selectRequest, so late async loads don't overwrite a newer pick
+let drag = null;          // sidebar drag in progress: { req } or { col }
 let prettyMode = true;
 let hist = { items: [], total: 0, q: '' };  // call history (stored server-side in SQLite)
 
@@ -113,6 +116,23 @@ channel?.addEventListener('message', ({ data }) => {
   }
   if (data?.type === 'history') loadHistory();
 });
+
+/* In-page replacement for window.prompt (which Electron doesn't support).
+   Resolves to the entered text, or null when cancelled. */
+function askText(title, value = '', { readOnly = false } = {}) {
+  const dlg = $('#askDialog');
+  const input = $('#askInput');
+  $('#askTitle').textContent = title;
+  input.value = value;
+  input.readOnly = readOnly;
+  $('#askOk').textContent = readOnly ? 'Close' : 'OK';
+  dlg.returnValue = '';
+  dlg.showModal();
+  input.select();
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok' && !readOnly ? input.value : null), { once: true });
+  });
+}
 
 /* toast('Saved') or toast('Deleted', { label: 'Undo', action: fn }) */
 function toast(msg, opt = {}) {
@@ -374,10 +394,10 @@ async function send() {
   $('#statusLine').innerHTML = '<span class="muted">Waiting for response…</span>';
   try {
     const result = await execute(req);
-    lastResult = result;
-    const r = result.response;
+    const shown = { result };
+    results.set(req.id, shown);
     save();
-    renderResponse();
+    if (currentId === req.id) showResponse(shown);
     recordHistory(req, result, 'send');
     if ($('#envDialog').open) renderEnvDialog();
   } finally {
@@ -572,7 +592,10 @@ function renderTree() {
     head.onclick = (e) => {
       const a = e.target.dataset.a;
       if (a === 'add') { addRequest(col); return; }
-      if (a === 'ren') { const n = prompt('Collection name', col.name); if (n) { col.name = n; save(); renderTree(); } return; }
+      if (a === 'ren') {
+        askText('Rename collection', col.name).then((n) => { if (n?.trim()) { col.name = n.trim(); save(); renderTree(); } });
+        return;
+      }
       if (a === 'del') {
         const at = ws.collections.indexOf(col);
         ws.collections.splice(at, 1);
@@ -586,6 +609,18 @@ function renderTree() {
       }
       col.collapsed = !col.collapsed; save(); renderTree();
     };
+    if (!q) {
+      // Drop a request on a collection header to move it to the end of that collection;
+      // drag a collection onto another to reorder collections.
+      draggable(head, { col }, (e) => {
+        if (drag?.req) return 'drop-into';
+        if (drag?.col && drag.col !== col) return dropHalf(head, e);
+        return null;
+      }, (mark) => {
+        if (drag.req) moveRequest(drag.req, col);
+        else moveCollection(drag.col, col, mark === 'drop-after');
+      });
+    }
     tree.appendChild(head);
     if (!open) continue;
     for (const r of reqs) {
@@ -617,9 +652,88 @@ function renderTree() {
         }
         selectRequest(r.id);
       };
+      if (!q) {
+        draggable(row, { req: r }, (e) => (drag?.req && drag.req !== r ? dropHalf(row, e) : null),
+          (mark) => moveRequest(drag.req, col, r, mark === 'drop-after'));
+      }
       tree.appendChild(row);
     }
   }
+}
+
+/* ---- Sidebar drag and drop (disabled while the filter is active) ---- */
+const DROP_MARKS = ['drop-before', 'drop-after', 'drop-into'];
+const clearDropMarks = () => $$('#tree .drop-before, #tree .drop-after, #tree .drop-into')
+  .forEach((el) => el.classList.remove(...DROP_MARKS));
+const dropHalf = (el, e) => {
+  const box = el.getBoundingClientRect();
+  return e.clientY > box.top + box.height / 2 ? 'drop-after' : 'drop-before';
+};
+
+/* where(e) returns the drop mark for the current drag over el, or null if it can't land there. */
+function draggable(el, payload, where, onDrop) {
+  el.draggable = true;
+  el.addEventListener('dragstart', (e) => {
+    drag = payload;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', (payload.req || payload.col).name);
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', () => { drag = null; el.classList.remove('dragging'); clearDropMarks(); });
+  el.addEventListener('dragover', (e) => {
+    const mark = drag && where(e);
+    if (!mark) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (!el.classList.contains(mark)) { clearDropMarks(); el.classList.add(mark); }
+  });
+  el.addEventListener('dragleave', (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove(...DROP_MARKS); });
+  el.addEventListener('drop', (e) => {
+    const mark = drag && where(e);
+    if (!mark) return;
+    e.preventDefault();
+    onDrop(mark);
+    drag = null;
+  });
+}
+
+/* Move req to toCol, before/after anchor (or to the end when there is no anchor). */
+function moveRequest(req, toCol, anchor = null, after = false) {
+  const from = findRequest(req.id)?.col;
+  if (!from || req === anchor) return;
+  from.requests.splice(from.requests.indexOf(req), 1);
+  const at = anchor ? toCol.requests.indexOf(anchor) + (after ? 1 : 0) : toCol.requests.length;
+  toCol.requests.splice(at, 0, req);
+  toCol.collapsed = false;
+  save(); renderTree();
+}
+
+function moveCollection(col, anchor, after = false) {
+  if (col === anchor) return;
+  ws.collections.splice(ws.collections.indexOf(col), 1);
+  ws.collections.splice(ws.collections.indexOf(anchor) + (after ? 1 : 0), 0, col);
+  save(); renderTree();
+}
+
+/* Alt+Shift+Up/Down: move the current request up or down (across collection boundaries). */
+function nudgeCurrent(dir) {
+  const hit = findRequest(currentId);
+  if (!hit) return;
+  const { col, req } = hit;
+  const i = col.requests.indexOf(req);
+  const j = i + dir;
+  if (j >= 0 && j < col.requests.length) {
+    col.requests.splice(i, 1);
+    col.requests.splice(j, 0, req);
+    save(); renderTree();
+    return;
+  }
+  const next = ws.collections[ws.collections.indexOf(col) + dir];
+  if (!next) return;
+  col.requests.splice(i, 1);
+  if (dir < 0) next.requests.push(req); else next.requests.unshift(req);
+  next.collapsed = false;
+  save(); renderTree();
 }
 
 /* Call history: every send is stored on the server with its response. */
@@ -675,15 +789,36 @@ async function openHistory(id) {
     save();
   }
   selectRequest(target.id);
-  lastResult = { req: target, tests: [], logs: [], ...entry.result };
-  lastResult.final ||= { url: entry.url, method: entry.method };
-  renderResponse();
+  const shown = fromHistory(entry, 'from history');
+  results.set(target.id, shown);
+  showResponse(shown);
+}
+
+/* A stored history entry as something the response pane can show. */
+function fromHistory(entry, label) {
+  const result = { tests: [], logs: [], ...entry.result };
+  result.final ||= { url: entry.url, method: entry.method };
   const notes = [];
   if (entry.result?.redacted) notes.push('secrets redacted');
   if (entry.result?.response?.storedTruncated) notes.push('body clipped to 2 MB');
-  if (notes.length) $('#statusLine').insertAdjacentHTML('beforeend', `<span class="note" title="Stored copy, not the live response">${esc(notes.join(' · '))}</span>`);
-  $('#statusLine').insertAdjacentHTML('beforeend',
-    `<span class="muted" title="${esc(entry.method)} ${esc(entry.url)}">· from history: ${esc(entry.method)} ${esc(entry.url.replace(/^https?:\/\//, ''))} · ${esc(new Date(entry.ts).toLocaleString())}</span>`);
+  let note = notes.length ? `<span class="note" title="Stored copy, not the live response">${esc(notes.join(' · '))}</span>` : '';
+  note += `<span class="muted" title="${esc(entry.method)} ${esc(entry.url)}">· ${esc(label)}: ${esc(entry.method)} ` +
+    `${esc(entry.url.replace(/^https?:\/\//, ''))} · ${esc(new Date(entry.ts).toLocaleString())}</span>`;
+  return { result, note };
+}
+
+/* No response yet this session: show the request's most recent call from history. */
+async function restoreLastCall(id, seq) {
+  let entry;
+  try {
+    const page = await api(`/api/history?limit=1&requestId=${encodeURIComponent(id)}`);
+    if (!page.items?.length) return;
+    entry = await api(`/api/history/${encodeURIComponent(page.items[0].id)}`);
+  } catch { return; }
+  if (results.has(id)) return; // a send finished while we were loading
+  const shown = fromHistory(entry, 'last call');
+  results.set(id, shown);
+  if (seq === selectSeq) showResponse(shown);
 }
 
 function renderHistory() {
@@ -785,14 +920,22 @@ function addRequest(col, req = newRequest()) {
 function selectRequest(id) {
   currentId = id;
   ws.lastRequestId = id;
-  lastResult = null;
+  const seq = ++selectSeq;
   renderTree();
   renderEditor();
-  renderResponse();
-  $('#statusLine').innerHTML = '<span class="muted">Send a request to see the response · ⌘/Ctrl+Enter</span>';
+  showResponse(results.get(id));
+  if (id && !results.has(id)) restoreLastCall(id, seq);
+}
+
+/* Paint the response pane from a { result, note } entry (or clear it). */
+function showResponse(shown) {
+  lastResult = shown?.result || null;
   $('#resBody').innerHTML = '';
   $('#resHeaders').innerHTML = '';
   $('#resTests').innerHTML = '';
+  if (!lastResult) $('#statusLine').innerHTML = '<span class="muted">Send a request to see the response · ⌘/Ctrl+Enter</span>';
+  renderResponse();
+  if (lastResult && shown.note) $('#statusLine').insertAdjacentHTML('beforeend', shown.note);
 }
 
 function renderEditor() {
@@ -1066,6 +1209,9 @@ async function runCollection() {
     table.appendChild(tr);
     const r = await execute(req);
     recordHistory(req, r, 'runner');
+    const shown = { result: r, note: '<span class="muted">· from collection run</span>' };
+    results.set(req.id, shown);
+    if (currentId === req.id) showResponse(shown);
     const cells = tr.children;
     if (r.error && !r.response?.ok) {
       errors++;
@@ -1137,10 +1283,15 @@ function bind() {
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key === 'Enter') { e.preventDefault(); send(); }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); toast('Saved'); }
+    if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+        !e.target.closest?.('input, textarea, select')) {
+      e.preventDefault();
+      nudgeCurrent(e.key === 'ArrowUp' ? -1 : 1);
+    }
   });
 
-  $('#btnNewCol').onclick = () => {
-    const name = prompt('Collection name', 'My Collection');
+  $('#btnNewCol').onclick = async () => {
+    const name = (await askText('New collection', 'My Collection'))?.trim();
     if (!name) return;
     const col = { id: uid(), name, collapsed: false, requests: [] };
     ws.collections.push(col);
@@ -1170,7 +1321,7 @@ function bind() {
     const r = current(); if (!r) return;
     const c = toCurl(buildFinal(r, envObject()));
     try { await navigator.clipboard.writeText(c); toast('cURL copied (pre-request script not applied)'); }
-    catch { prompt('Copy this cURL command:', c); }
+    catch { askText('Copy this cURL command', c, { readOnly: true }); }
   };
   $('#btnImportCurl').onclick = () => { $('#curlText').value = ''; $('#curlDialog').showModal(); $('#curlText').focus(); };
   $('#btnDoCurl').onclick = () => {

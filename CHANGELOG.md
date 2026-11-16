@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Switching requests no longer loses the response.** Each request keeps its last response for
+  the session, and after a reload its most recent call is restored from history. A response that
+  arrives after you switch away is shown on the request that sent it, not the one now open.
+
+### Added
+- **Drag and drop in the sidebar.** Reorder requests, move them between collections, and reorder
+  collections. **Alt+Shift+↑/↓** moves the selected request from the keyboard.
+
 ## 0.3.0
 
 Hardening release: data safety and security.

@@ -227,3 +227,51 @@ def test_edit_survives_closing_the_tab_right_away(browser, app):
         time.sleep(0.1)
     else:
         pytest.fail("edit was lost on close")
+
+
+def test_response_survives_switching_requests_and_reload(browser, app):
+    _, url = app
+    page = open_page(browser, url)
+    send(page, "Get item")
+    page.locator(".req-row", has_text="Login").click()
+    assert "Send a request" in page.locator("#statusLine").inner_text()
+    page.locator(".req-row", has_text="Get item").click()
+    assert page.locator("#statusLine .pill").inner_text().startswith("200")
+    assert page.locator("#testCount").inner_text() == "2/2"
+    # after a reload the last call comes back from history
+    page.wait_for_selector(".hist-row")
+    page.reload()
+    page.locator(".req-row", has_text="Get item").click()
+    expect(page.locator("#statusLine .pill")).to_have_text("200 OK")
+    assert "last call" in page.locator("#statusLine").inner_text()
+
+
+def tree_names(page):
+    return [t.strip() for t in page.locator(".req-row .row-name").all_inner_texts()]
+
+
+def test_drag_to_reorder_requests_is_saved(browser, app):
+    store, url = app
+    page = open_page(browser, url)
+    page.locator(".req-row", has_text="Spin").drag_to(
+        page.locator(".req-row", has_text="Get item"), target_position={"x": 20, "y": 2})
+    assert tree_names(page) == ["Spin", "Get item", "Login", "Sneaky"]
+    expect(page.locator("#saveState")).to_have_text("saved")
+    assert [r["name"] for r in store.load_workspace()["collections"][0]["requests"]] == \
+        ["Spin", "Get item", "Login", "Sneaky"]
+    # keyboard: Alt+Shift+Down moves the selected request down
+    page.locator(".req-row", has_text="Spin").click()
+    page.keyboard.press("Alt+Shift+ArrowDown")
+    assert tree_names(page) == ["Get item", "Spin", "Login", "Sneaky"]
+
+
+def test_drag_request_into_another_collection(browser, app):
+    store, url = app
+    page = open_page(browser, url)
+    page.click("#btnNewCol")  # creates "Other" with one new request
+    page.fill("#askInput", "Other")
+    page.click("#askOk")
+    page.locator(".req-row", has_text="Login").drag_to(page.locator(".col-row", has_text="Other"))
+    expect(page.locator("#saveState")).to_have_text("saved")
+    cols = {c["name"]: [r["name"] for r in c["requests"]] for c in store.load_workspace()["collections"]}
+    assert "Login" not in cols["Suite"] and cols["Other"][-1] == "Login"

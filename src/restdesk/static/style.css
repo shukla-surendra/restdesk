@@ -56,6 +56,10 @@ code { font-family: var(--mono); font-size: 12px; background: var(--panel2); pad
 .req-row { padding-left: 24px; }
 .col-row:hover, .req-row:hover, .hist-row:hover { background: var(--panel2); }
 .req-row.active { background: var(--sel); }
+.col-row.dragging, .req-row.dragging { opacity: .4; }
+.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.drop-into { outline: 1px dashed var(--accent); outline-offset: -1px; }
 .row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-actions { display: none; gap: 0; }
 .col-row:hover .row-actions, .req-row:hover .row-actions { display: flex; }
@@ -129,6 +133,9 @@ textarea.code.short { min-height: 110px; flex: none; margin-bottom: 10px; }
 /* dialogs */
 .dlg { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text); padding: 14px; width: min(640px, 94vw); }
 .dlg.wide { width: min(900px, 96vw); }
+.dlg.narrow { width: min(420px, 94vw); }
+#askInput { width: 100%; margin-bottom: 12px; }
+#askDialog .row { gap: 8px; }
 .dlg::backdrop { background: rgb(0 0 0 / .35); }
 .dlg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 #curlText { width: 100%; min-height: 180px; }
