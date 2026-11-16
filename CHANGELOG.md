@@ -8,6 +8,12 @@
   arrives after you switch away is shown on the request that sent it, not the one now open.
 
 ### Added
+- **Desktop app.** An Electron wrapper in `desktop/` runs the same UI with a bundled, PyInstaller-frozen
+  server, so no Python install is needed. A CI workflow builds macOS, Windows and Linux installers.
+  See [docs/desktop.md](docs/desktop.md).
+- Server: `--port 0` picks a free port, a `RESTDESK_READY <url>` line is printed at startup, and
+  `--exit-with-stdin` stops the server when its parent process goes away.
+- Naming or renaming a collection uses an in-page dialog instead of the browser's `prompt()`.
 - **Drag and drop in the sidebar.** Reorder requests, move them between collections, and reorder
   collections. **Alt+Shift+↑/↓** moves the selected request from the keyboard.
 

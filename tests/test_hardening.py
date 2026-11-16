@@ -208,3 +208,29 @@ def test_redacted_flag_only_when_something_was_masked(store):
         "final": {"url": "http://x", "headers": [["Accept", "*/*"]]},
         "response": {"ok": True, "status": 200, "body": '{"a": 1}', "headers": []}}})
     assert "redacted" not in store.get_history(row["id"])["result"]
+
+
+def test_desktop_launch_mode_free_port_ready_line_and_exit_with_stdin(tmp_path):
+    """How the Electron app runs the server: port 0, read the READY line, close stdin to stop."""
+    import subprocess
+    import sys
+    import urllib.request
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "restdesk", "--port", "0", "--no-browser", "--exit-with-stdin",
+         "--data", str(tmp_path / "d.db")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        url = None
+        for line in proc.stdout:
+            if line.startswith("RESTDESK_READY "):
+                url = line.split(" ", 1)[1].strip()
+                break
+        assert url and not url.endswith(":0/")
+        with urllib.request.urlopen(url, timeout=5) as r:
+            assert r.status == 200 and b"RestDesk" in r.read()
+        proc.stdin.close()
+        assert proc.wait(timeout=10) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()

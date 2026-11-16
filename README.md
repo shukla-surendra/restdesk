@@ -31,6 +31,12 @@ uv run restdesk
 Options: `--port 9000`, `--data ./my.db`, `--history-limit 5000`, `--no-browser`,
 `--export backup.json`, `--keep-secrets-in-history`. Run `restdesk --help` for the full list.
 
+### Desktop app
+
+RestDesk also ships as an Electron desktop app (macOS, Windows, Linux) that bundles the server, so
+no Python is needed. It is the same UI and the same database as the web version. See
+[docs/desktop.md](docs/desktop.md) to run or build it (`cd desktop && npm install && npm start`).
+
 ## Why it works this way
 
 The UI runs in your browser, and the small Python process sends the actual HTTP calls. Because the

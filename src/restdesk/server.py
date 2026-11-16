@@ -313,7 +313,8 @@ def _migrate_legacy(store: Store, explicit: str | None) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="restdesk", description="RestDesk - lightweight local REST client")
     ap.add_argument("--version", action="version", version=f"RestDesk {VERSION}")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("RESTDESK_PORT", 8787)))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("RESTDESK_PORT", 8787)),
+                    help="port to listen on (0 = pick a free one)")
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (keep 127.0.0.1 - this is an HTTP proxy)")
     ap.add_argument("--data", default=os.environ.get("RESTDESK_DATA", str(default_data_path())),
@@ -328,6 +329,8 @@ def main(argv=None) -> int:
     ap.add_argument("--export", metavar="FILE",
                     help="write collections, environments and history to a JSON file and exit")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
+    ap.add_argument("--exit-with-stdin", action="store_true",
+                    help="stop when stdin closes (used by the desktop app, so the server never outlives it)")
     args = ap.parse_args(argv)
 
     data_path = Path(args.data).expanduser().resolve()
@@ -346,10 +349,20 @@ def main(argv=None) -> int:
 
     _migrate_legacy(store, args.import_json)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store))
-    url = f"http://127.0.0.1:{args.port}/"
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"RestDesk {VERSION} running at {url}")
     print(f"Database: {data_path}")
     print("Press Ctrl+C to stop.")
+    print(f"RESTDESK_READY {url}", flush=True)  # machine-readable, for the desktop app
+    if args.exit_with_stdin:
+        def _watch_stdin() -> None:
+            try:
+                while sys.stdin.buffer.read(4096):
+                    pass
+            except (OSError, ValueError):
+                pass
+            server.shutdown()
+        threading.Thread(target=_watch_stdin, daemon=True).start()
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:

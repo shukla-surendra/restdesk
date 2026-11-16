@@ -1,0 +1,56 @@
+{
+  "name": "restdesk-desktop",
+  "productName": "RestDesk",
+  "version": "0.3.0",
+  "description": "RestDesk desktop app: lightweight local REST client",
+  "license": "MIT",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node scripts/smoke.mjs",
+    "build:server": "node scripts/build-server.mjs",
+    "dist": "npm run build:server && electron-builder",
+    "dist:dir": "npm run build:server && electron-builder --dir"
+  },
+  "build": {
+    "appId": "io.github.restdesk",
+    "productName": "RestDesk",
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/server-dist/restdesk-server",
+        "to": "server"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.3.3",
+    "electron-builder": "^26.18.0"
+  }
+}
