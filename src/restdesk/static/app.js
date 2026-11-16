@@ -15,6 +15,7 @@ let lastResult = null;    // result shown in the response pane
 const results = new Map(); // request id -> { result, note }: last response per request (survives switching)
 let selectSeq = 0;        // bumps on every selectRequest, so late async loads don't overwrite a newer pick
 let drag = null;          // sidebar drag in progress: { req } or { col }
+let appVersion = '';      // from /api/info
 let prettyMode = true;
 let hist = { items: [], total: 0, q: '' };  // call history (stored server-side in SQLite)
 
@@ -227,21 +228,139 @@ function envObject() {
   return o;
 }
 
-function resolveVars(str, vars, depth = 0) {
+/* {{...}} templates. A template is one or more terms joined by ??; the first term with a
+   value wins, so {{@Login.body.token ?? token}} uses the Login response and falls back to the
+   environment variable (or the other way round). Terms:
+     name                   environment variable
+     $uuid, $timestamp...   dynamic values
+     @Request.body.a.b[0]   value from another request's last response (also .header.Name,
+                            .status, .body); quote names with spaces or dots: @"Get user".body.id
+     "text"                 a literal default
+   ctx = { from: request being built, unresolved: [] } collects templates that found no value. */
+const TEMPLATE_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
+const REDACTED = '[redacted]';
+
+function resolveVars(str, vars, depth = 0, ctx = null) {
   if (str == null) return '';
-  return String(str).replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (m, name) => {
-    switch (name) {
-      case '$uuid': return uid();
-      case '$timestamp': return String(Math.floor(Date.now() / 1000));
-      case '$isoTimestamp': return new Date().toISOString();
-      case '$randomInt': return String(Math.floor(Math.random() * 1000));
-    }
-    if (Object.prototype.hasOwnProperty.call(vars, name)) {
-      const v = String(vars[name]);
-      return depth < 5 && v.includes('{{') ? resolveVars(v, vars, depth + 1) : v;
-    }
-    return m; // leave unknown variables visible so mistakes are obvious
+  return String(str).replace(TEMPLATE_RE, (m, expr) => {
+    const v = evalTemplate(expr, vars, depth, ctx);
+    if (v !== undefined) return v;
+    if (ctx && !ctx.unresolved.includes(m)) ctx.unresolved.push(m);
+    return m; // leave unresolved templates visible so mistakes are obvious
   });
+}
+
+/* Split on a separator that is not inside quotes. */
+function splitTop(expr, sep) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  for (let i = 0; i < expr.length; i++) {
+    const c = expr[i];
+    if (quote) { cur += c; if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
+    if (expr.startsWith(sep, i)) { out.push(cur.trim()); cur = ''; i += sep.length - 1; continue; }
+    cur += c;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+const isBlank = (v) => v === undefined || v === null || v === '';
+
+function evalTemplate(expr, vars, depth, ctx) {
+  let empty;
+  for (const term of splitTop(expr, '??')) {
+    const v = evalTerm(term, vars, depth, ctx);
+    if (!isBlank(v)) return v;
+    if (v === '') empty = ''; // an existing-but-empty value is still used if nothing better is found
+  }
+  return empty;
+}
+
+function evalTerm(term, vars, depth, ctx) {
+  if (/^(["']).*\1$/s.test(term)) return term.slice(1, -1);
+  switch (term) {
+    case '$uuid': return uid();
+    case '$timestamp': return String(Math.floor(Date.now() / 1000));
+    case '$isoTimestamp': return new Date().toISOString();
+    case '$randomInt': return String(Math.floor(Math.random() * 1000));
+  }
+  if (term.startsWith('@')) return refValue(term, ctx);
+  if (Object.prototype.hasOwnProperty.call(vars, term)) {
+    const v = String(vars[term] ?? '');
+    return depth < 5 && v.includes('{{') ? resolveVars(v, vars, depth + 1, ctx) : v;
+  }
+  return undefined;
+}
+
+/* '@Login.body.token' -> { name: 'Login', part: 'body', sub: '.token' } */
+function parseRef(term) {
+  let rest = term.slice(1).trim();
+  let name;
+  if (rest[0] === '"' || rest[0] === "'") {
+    const end = rest.indexOf(rest[0], 1);
+    if (end < 0) return null;
+    name = rest.slice(1, end);
+    rest = rest.slice(end + 1);
+  } else {
+    const dot = rest.indexOf('.');
+    name = dot < 0 ? rest : rest.slice(0, dot);
+    rest = dot < 0 ? '' : rest.slice(dot);
+  }
+  if (!name) return null;
+  if (!rest) return { name, part: 'body', sub: '' };
+  const m = rest.match(/^\.(body|headers?|status)(.*)$/s);
+  return m ? { name, part: m[1] === 'headers' ? 'header' : m[1], sub: m[2] } : null;
+}
+
+/* Request referenced by name: same collection first, then any collection. */
+function findByName(name, from) {
+  const lc = name.trim().toLowerCase();
+  const match = (c) => c.requests.find((r) => r.name.trim().toLowerCase() === lc);
+  const home = from && findRequest(from.id)?.col;
+  return (home && match(home)) || ws.collections.map(match).find(Boolean) || null;
+}
+
+function refValue(term, ctx) {
+  const ref = parseRef(term);
+  const target = ref && findByName(ref.name, ctx?.from);
+  const res = target && results.get(target.id)?.result?.response;
+  if (!res?.ok) return undefined;
+  let v;
+  if (ref.part === 'status') v = res.status;
+  else if (ref.part === 'header') {
+    const want = ref.sub.replace(/^\./, '').toLowerCase();
+    v = res.headers.find(([k]) => k.toLowerCase() === want)?.[1];
+  } else {
+    if (res.bodyEncoding === 'base64') return undefined;
+    if (!ref.sub) v = res.body;
+    else {
+      try { v = jsonPath(JSON.parse(res.body), '$' + ref.sub); } catch { return undefined; }
+    }
+  }
+  if (v === undefined || v === null) return undefined;
+  v = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  return v.includes(REDACTED) ? undefined : v; // masked in stored history: let a fallback win
+}
+
+/* Before a send: make sure every request referenced with @Name has its last response loaded
+   (from this session, else from history), so the synchronous resolver can see it. */
+async function preloadRefs(req, extra = '') {
+  const text = JSON.stringify(req) + extra;
+  const ids = new Set();
+  for (const [, expr] of text.matchAll(TEMPLATE_RE)) {
+    for (const term of splitTop(expr, '??')) {
+      if (!term.startsWith('@')) continue;
+      const ref = parseRef(term.replace(/\\"/g, '"'));
+      const target = ref && findByName(ref.name, req);
+      if (target && !results.has(target.id)) ids.add(target.id);
+    }
+  }
+  await Promise.all([...ids].map(async (id) => {
+    const shown = await loadLastCall(id);
+    if (shown && !results.has(id)) results.set(id, shown);
+  }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -250,8 +369,8 @@ function resolveVars(str, vars, depth = 0) {
 const hasHeader = (list, name) => list.some(([k]) => k.toLowerCase() === name.toLowerCase());
 const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 
-function buildFinal(req, vars) {
-  const R = (s) => resolveVars(s, vars);
+function buildFinal(req, vars, ctx = { from: req, unresolved: [] }) {
+  const R = (s) => resolveVars(s, vars, 0, ctx);
   let url = R((req.url || '').trim());
   if (url && !/^https?:\/\//i.test(url)) url = 'http://' + url;
 
@@ -357,8 +476,12 @@ async function execute(req) {
   }
   if (pre?.req) draft = pre.req;
 
-  const final = buildFinal(draft, vars);
+  await preloadRefs(draft, JSON.stringify(vars));
+  const ctx = { from: req, unresolved: [] };
+  const final = buildFinal(draft, vars, ctx);
   result.final = final;
+  result.unresolved = ctx.unresolved;
+  if (ctx.unresolved.length) logs.push(`Not resolved (sent as written): ${ctx.unresolved.join(', ')}`);
   if (!final.url) { result.error = 'URL is empty'; applyEnvChanges(changes); return result; }
 
   try {
@@ -398,6 +521,7 @@ async function send() {
     results.set(req.id, shown);
     save();
     if (currentId === req.id) showResponse(shown);
+    if (result.unresolved?.length) toast(`Not resolved: ${result.unresolved.join(', ')}`);
     recordHistory(req, result, 'send');
     if ($('#envDialog').open) renderEnvDialog();
   } finally {
@@ -551,6 +675,14 @@ function renderKV(container, list, { keyPh = 'name', valPh = 'value', datalist =
     $('input[type=checkbox]', tr).onchange = (e) => { item.enabled = e.target.checked; tr.className = item.enabled ? '' : 'off'; changed(); };
     $('.k', tr).oninput = (e) => { item.key = e.target.value; changed(); };
     $('.v', tr).oninput = (e) => { item.value = e.target.value; changed(); };
+    // Hover a value that uses {{templates}} to see what it resolves to right now.
+    $('.v', tr).onmouseenter = (e) => {
+      const v = e.target.value;
+      if (!v.includes('{{')) { e.target.title = ''; return; }
+      const ctx = { from: current(), unresolved: [] };
+      const out = resolveVars(v, envObject(), 0, ctx);
+      e.target.title = `→ ${out}${ctx.unresolved.length ? `\n(not resolved: ${ctx.unresolved.join(', ')})` : ''}`;
+    };
     $('button', tr).onclick = () => { list.splice(i, 1); renderKV(container, list, { keyPh, valPh, datalist }); changed(); };
     table.appendChild(tr);
   });
@@ -809,16 +941,19 @@ function fromHistory(entry, label) {
 
 /* No response yet this session: show the request's most recent call from history. */
 async function restoreLastCall(id, seq) {
-  let entry;
-  try {
-    const page = await api(`/api/history?limit=1&requestId=${encodeURIComponent(id)}`);
-    if (!page.items?.length) return;
-    entry = await api(`/api/history/${encodeURIComponent(page.items[0].id)}`);
-  } catch { return; }
-  if (results.has(id)) return; // a send finished while we were loading
-  const shown = fromHistory(entry, 'last call');
+  const shown = await loadLastCall(id);
+  if (!shown || results.has(id)) return; // nothing stored, or a send finished while loading
   results.set(id, shown);
   if (seq === selectSeq) showResponse(shown);
+}
+
+/* The most recent stored call of a request, as a { result, note } entry (or null). */
+async function loadLastCall(id) {
+  try {
+    const page = await api(`/api/history?limit=1&requestId=${encodeURIComponent(id)}`);
+    if (!page.items?.length) return null;
+    return fromHistory(await api(`/api/history/${encodeURIComponent(page.items[0].id)}`), 'last call');
+  } catch { return null; }
 }
 
 function renderHistory() {
@@ -925,6 +1060,8 @@ function selectRequest(id) {
   renderEditor();
   showResponse(results.get(id));
   if (id && !results.has(id)) restoreLastCall(id, seq);
+  const req = current();
+  if (req) preloadRefs(req, JSON.stringify(envObject())).then(() => { if (seq === selectSeq) updateResolvedPreview(); });
 }
 
 /* Paint the response pane from a { result, note } entry (or clear it). */
@@ -1365,45 +1502,162 @@ function bind() {
   };
   $$('[data-close]').forEach((b) => { b.onclick = () => b.closest('dialog').close(); });
 
-  $('#btnExport').onclick = async () => {
-    await flushSave();
-    const withHist = hist.total && confirm('Include call history in the export?\n(Responses may contain tokens or personal data.)');
-    let text;
-    try { text = JSON.stringify(await api(`/api/export?history=${withHist ? 1 : 0}`), null, 2); }
-    catch (e) { toast(`Export failed: ${e.message}`); return; }
-    const blob = new Blob([text], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `restdesk-workspace-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  };
+  $('#btnExport').onclick = openExport;
+  $('#btnDoExport').onclick = doExport;
+  $$('#exportDialog [data-all]').forEach((all) => {
+    all.onchange = () => $$(`#exportDialog input[data-${all.dataset.all}]`).forEach((b) => { b.checked = all.checked; });
+  });
   $('#btnImport').onclick = () => $('#fileImport').click();
   $('#fileImport').onchange = async (e) => {
     const file = e.target.files[0];
     e.target.value = '';
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      if (!Array.isArray(data.collections)) throw new Error('not a RestDesk workspace');
-      const mode = confirm('OK = merge into current workspace\nCancel = replace current workspace');
-      const incoming = normalizeWorkspace(data);
-      if (mode) {
-        ws.collections.push(...incoming.collections);
-        ws.environments.push(...incoming.environments.filter((e2) => !ws.environments.some((x) => x.id === e2.id)));
-      } else {
-        ws = incoming;
-      }
-      save(); renderAll();
-      const calls = Array.isArray(data.callHistory) ? data.callHistory : [];
-      for (const h of calls.slice().reverse()) {
-        if (!h?.snapshot) continue;
-        await api('/api/history', { method: 'POST', body: JSON.stringify({ id: h.id, ts: h.ts, source: h.source, snapshot: h.snapshot, result: h.result }) });
-      }
-      if (calls.length) loadHistory();
-      toast(`Workspace imported${calls.length ? ` (+${calls.length} history entries)` : ''}`);
-    } catch (err) { toast(`Import failed: ${err.message}`); }
+    if (file) openImport(file);
   };
+  $$('#importDialog input[name=impMode]').forEach((r) => { r.onchange = syncImportOptions; });
+  $('#btnDoImport').onclick = doImport;
+}
+
+/* ------------------------------------------------------------------ */
+/* Project export / import                                             */
+/*                                                                     */
+/* A project file holds collections, environments (with all their      */
+/* variables), the active environment and, optionally, call history.   */
+/* ------------------------------------------------------------------ */
+const PROJECT_FORMAT = 'restdesk-project';
+let pendingImport = null;   // parsed file waiting in the import dialog
+const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
+
+async function openExport() {
+  await flushSave();
+  const row = (attr, id, name, meta) =>
+    `<label><input type="checkbox" data-${attr}="${esc(id)}" checked><span>${esc(name)}</span><span class="muted">${esc(meta)}</span></label>`;
+  $('#expCols').innerHTML = ws.collections.map((c) => row('col', c.id, c.name, plural(c.requests.length, 'request'))).join('') ||
+    '<span class="muted">No collections</span>';
+  $('#expEnvs').innerHTML = ws.environments.map((e) => row('env', e.id, e.name, plural(e.vars.filter((v) => v.key).length, 'variable'))).join('') ||
+    '<span class="muted">No environments</span>';
+  $$('#exportDialog [data-all]').forEach((b) => { b.checked = true; });
+  $('#expHistory').checked = false;
+  $('#expHistory').disabled = !hist.total;
+  $('#expHistCount').textContent = hist.total ? `(${plural(hist.total, 'call')}; responses may contain personal data)` : '(none)';
+  $('#exportDialog').showModal();
+}
+
+async function doExport() {
+  const picked = (attr) => new Set($$(`#exportDialog input[data-${attr}]:checked`).map((b) => b.dataset[attr]));
+  const cols = picked('col');
+  const envs = picked('env');
+  const project = {
+    format: PROJECT_FORMAT,
+    formatVersion: 1,
+    exportedAt: new Date().toISOString(),
+    app: `RestDesk ${appVersion || ''}`.trim(),
+    version: ws.version || 1,
+    activeEnvId: envs.has(ws.activeEnvId) ? ws.activeEnvId : null,
+    environments: clone(ws.environments.filter((e) => envs.has(e.id))),
+    collections: clone(ws.collections.filter((c) => cols.has(c.id))),
+  };
+  if (!project.collections.length && !project.environments.length) { toast('Nothing selected to export'); return; }
+  if ($('#expHistory').checked) {
+    try { project.callHistory = (await api('/api/export?history=1')).callHistory || []; }
+    catch (e) { toast(`Export failed: ${e.message}`); return; }
+  }
+  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `restdesk-project-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  $('#exportDialog').close();
+  toast(`Exported ${plural(project.collections.length, 'collection')}, ${plural(project.environments.length, 'environment')}`);
+}
+
+async function openImport(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+    if (!data || !Array.isArray(data.collections)) throw new Error('not a RestDesk project or workspace file');
+  } catch (e) { toast(`Import failed: ${e.message}`); return; }
+  const incoming = normalizeWorkspace(clone(data));
+  const calls = Array.isArray(data.callHistory) ? data.callHistory.filter((h) => h?.snapshot) : [];
+  pendingImport = { incoming, calls, activeEnvId: data.activeEnvId || null };
+  const li = (name, meta) => `<li>${esc(name)} <span class="muted">· ${esc(meta)}</span></li>`;
+  $('#impSummary').innerHTML = `<b>${esc(file.name)}</b>` +
+    (data.exportedAt ? ` <span class="muted">· exported ${esc(new Date(data.exportedAt).toLocaleString())}</span>` : '') +
+    `<ul>${incoming.collections.map((c) => li(c.name, plural(c.requests.length, 'request'))).join('')}` +
+    `${incoming.environments.map((e) => li(`${e.name} (environment)`, plural((e.vars || []).filter((v) => v.key).length, 'variable'))).join('')}</ul>`;
+  $('#importDialog input[value=merge]').checked = true;
+  $('#impOverwrite').checked = true;
+  $('#impHistory').checked = true;
+  $('#impHistoryRow').hidden = !calls.length;
+  $('#impHistCount').textContent = `(${plural(calls.length, 'call')})`;
+  syncImportOptions();
+  $('#importDialog').showModal();
+}
+
+function syncImportOptions() {
+  const merge = $('#importDialog input[value=merge]').checked;
+  $('#impOverwriteRow').hidden = !merge;
+  $('#btnDoImport').textContent = merge ? 'Import' : 'Replace project';
+  $('#btnDoImport').classList.toggle('danger', !merge);
+}
+
+/* Merge `incoming` into the workspace without ever creating duplicate ids. */
+function mergeProject(incoming, { overwriteVars }) {
+  const counts = { added: 0, updated: 0, envAdded: 0, envMerged: 0 };
+  for (const col of incoming.collections) {
+    const at = ws.collections.findIndex((c) => c.id === col.id);
+    if (at >= 0) { ws.collections[at] = col; counts.updated++; } else { ws.collections.push(col); counts.added++; }
+  }
+  // A request id may now appear twice (e.g. moved to another collection after the export): re-id the copies.
+  const seen = new Set();
+  for (const c of ws.collections) {
+    for (const r of c.requests) { if (seen.has(r.id)) r.id = uid(); seen.add(r.id); }
+  }
+  for (const env of incoming.environments) {
+    env.vars ||= [];
+    const mine = ws.environments.find((e) => e.id === env.id) ||
+      ws.environments.find((e) => e.name.trim().toLowerCase() === env.name.trim().toLowerCase());
+    if (!mine) { ws.environments.push(env); counts.envAdded++; continue; }
+    counts.envMerged++;
+    for (const v of env.vars) {
+      if (!v.key) continue;
+      const have = mine.vars.find((x) => x.key === v.key);
+      if (!have) mine.vars.push({ ...v });
+      else if (overwriteVars) Object.assign(have, v);
+    }
+  }
+  return counts;
+}
+
+async function doImport() {
+  if (!pendingImport) return;
+  const { incoming, calls, activeEnvId } = pendingImport;
+  const replace = $('#importDialog input[value=replace]').checked;
+  let msg;
+  if (replace) {
+    ws.collections = incoming.collections;
+    ws.environments = incoming.environments;
+    ws.activeEnvId = ws.environments.some((e) => e.id === activeEnvId) ? activeEnvId : ws.environments[0]?.id || null;
+    msg = `Project replaced: ${plural(ws.collections.length, 'collection')}, ${plural(ws.environments.length, 'environment')}`;
+  } else {
+    const n = mergeProject(incoming, { overwriteVars: $('#impOverwrite').checked });
+    if (!activeEnv()) ws.activeEnvId = ws.environments.find((e) => e.id === activeEnvId)?.id || ws.environments[0]?.id || null;
+    msg = `Imported: ${plural(n.added, 'new collection')}${n.updated ? `, ${n.updated} updated` : ''}` +
+      `${n.envAdded ? `, ${plural(n.envAdded, 'new environment')}` : ''}${n.envMerged ? `, ${n.envMerged} merged` : ''}`;
+  }
+  pendingImport = null;
+  $('#importDialog').close();
+  save(); renderAll();
+  if (calls.length && $('#impHistory').checked) {
+    for (const h of calls.slice().reverse()) {
+      try {
+        await api('/api/history', { method: 'POST', body: JSON.stringify({ id: h.id, ts: h.ts, source: h.source, snapshot: h.snapshot, result: h.result }) });
+      } catch (e) { console.error(e); }
+    }
+    loadHistory();
+    msg += ` (+${plural(calls.length, 'history entry', 'history entries')})`;
+  }
+  toast(msg);
 }
 
 function renderAll() {
@@ -1432,6 +1686,7 @@ async function init() {
   try {
     const info = await api('/api/info');
     $('#saveState').title = `Stored in ${info.dataPath}`;
+    appVersion = info.version || '';
   } catch { /* older server */ }
 
   // Save as soon as the tab is hidden (switching tabs, minimising, closing on mobile).

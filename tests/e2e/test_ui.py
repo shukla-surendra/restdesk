@@ -34,6 +34,8 @@ class Target(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/echo"):
+            return self._json(200, {"headers": {k.lower(): v for k, v in self.headers.items()}})
         if self.path.startswith("/item"):
             return self._json(200, {"id": 1, "title": "hello"})
         return self._json(404, {})
@@ -275,3 +277,93 @@ def test_drag_request_into_another_collection(browser, app):
     expect(page.locator("#saveState")).to_have_text("saved")
     cols = {c["name"]: [r["name"] for r in c["requests"]] for c in store.load_workspace()["collections"]}
     assert "Login" not in cols["Suite"] and cols["Other"][-1] == "Login"
+
+
+def add_request(store, request, env_vars=()):
+    ws = store.load_workspace()
+    ws["collections"][0]["requests"].append(request)
+    ws["environments"][0]["vars"] += [{"key": k, "value": v, "enabled": True} for k, v in env_vars]
+    store.save_workspace(ws, base_revision=ws.pop("revision"))
+
+
+def echoed(page):
+    return json.loads(page.locator("#resBody").inner_text())["headers"]
+
+
+def test_response_references_with_fallbacks(browser, app):
+    store, url = app
+    r = req("r5", "Use token", "{{base}}/echo")
+    r["headers"] = [
+        {"key": "X-Token", "value": "{{@Login.body.access_token ?? fallbackTok}}", "enabled": True},
+        {"key": "X-Reverse", "value": "{{missingVar ?? @Login.body.user}}", "enabled": True},
+        {"key": "X-Status", "value": "{{@Login.status}}", "enabled": True},
+        {"key": "X-Ctype", "value": '{{@"Login".header.content-type}}', "enabled": True},
+        {"key": "X-Default", "value": "{{@Nope.body.x ?? 'dflt'}}", "enabled": True},
+    ]
+    add_request(store, r, [("fallbackTok", "env-tok")])
+    page = open_page(browser, url)
+
+    # Login never sent: env fallback / literal default; unresolvable ones are reported
+    send(page, "Use token")
+    h = echoed(page)
+    assert h["x-token"] == "env-tok" and h["x-default"] == "dflt"
+    assert h["x-status"] == "{{@Login.status}}"
+    assert "Not resolved" in page.locator("#toast").inner_text()
+
+    # after Login: values come from its response
+    send(page, "Login")
+    send(page, "Use token")
+    h = echoed(page)
+    assert h["x-token"] == "tok-SECRET-123"
+    assert h["x-reverse"] == "bob" and h["x-status"] == "200" and h["x-ctype"] == "application/json"
+
+    # after a reload, Login's stored response has the token redacted, so the env fallback wins,
+    # while non-secret fields still come from history
+    expect(page.locator(".hist-row")).to_have_count(3)
+    page.reload()
+    page.wait_for_selector(".req-row")
+    send(page, "Use token")
+    h = echoed(page)
+    assert h["x-token"] == "env-tok" and h["x-reverse"] == "bob"
+
+
+def test_export_and_import_project(browser, app, tmp_path):
+    store, url = app
+    page = open_page(browser, url)
+    page.click("#btnExport")
+    with page.expect_download() as dl:
+        page.click("#btnDoExport")
+    path = tmp_path / "project.json"
+    dl.value.save_as(path)
+    data = json.loads(path.read_text())
+    assert data["format"] == "restdesk-project"
+    assert [c["name"] for c in data["collections"]] == ["Suite"]
+    assert data["environments"][0]["vars"][0]["key"] == "base"
+    assert "callHistory" not in data
+
+    # change things, then merge the file back: no duplicates, variables restored, local ones kept
+    ws = store.load_workspace()
+    ws["environments"][0]["vars"][0]["value"] = "changed"
+    ws["environments"][0]["vars"].append({"key": "local", "value": "keep", "enabled": True})
+    store.save_workspace(ws, base_revision=ws.pop("revision"))
+    page.reload()
+    page.wait_for_selector(".req-row")
+    page.set_input_files("#fileImport", str(path))
+    expect(page.locator("#impSummary")).to_contain_text("Suite")
+    page.click("#btnDoImport")
+    expect(page.locator("#saveState")).to_have_text("saved")
+    ws = store.load_workspace()
+    ids = [r["id"] for c in ws["collections"] for r in c["requests"]]
+    assert len(ws["collections"]) == 1 and len(ids) == len(set(ids)) == 4
+    env_vars = {v["key"]: v["value"] for v in ws["environments"][0]["vars"]}
+    assert env_vars["base"] != "changed" and env_vars["local"] == "keep"
+
+    # replace mode swaps the whole project
+    page.click("#btnNewCol")
+    page.fill("#askInput", "Scratch")
+    page.click("#askOk")
+    page.set_input_files("#fileImport", str(path))
+    page.check("#importDialog input[value=replace]")
+    page.click("#btnDoImport")
+    expect(page.locator("#saveState")).to_have_text("saved")
+    assert [c["name"] for c in store.load_workspace()["collections"]] == ["Suite"]

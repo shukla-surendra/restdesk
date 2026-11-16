@@ -12,6 +12,7 @@ const path = require('node:path');
 
 const SMOKE = process.env.RESTDESK_SMOKE === '1'; // CI: start, check the UI renders, quit
 const READY_TIMEOUT_MS = 30000;
+const ICON = path.join(__dirname, 'resources', 'icon.png'); // window/taskbar icon on Windows and Linux
 
 let server = null;
 let serverUrl = null;
@@ -72,6 +73,7 @@ function createWindow() {
     title: 'RestDesk',
     show: false,
     autoHideMenuBar: true,
+    icon: ICON,
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
   });
   win.once('ready-to-show', () => { if (!SMOKE) win.show(); });
@@ -146,6 +148,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     buildMenu();
+    if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(ICON); // packaged apps use the .icns
     try {
       await startServer();
     } catch (e) {

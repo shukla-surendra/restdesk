@@ -61,7 +61,49 @@ to other variables.
 
 Built-ins: `{{$uuid}}`, `{{$timestamp}}` (Unix ms), `{{$isoTimestamp}}`, `{{$randomInt}}`.
 
+You can also use a value from another request's response, with fallbacks:
+`{{@Login.body.access_token ?? token}}`. See
+[Using one response in another request](#using-one-response-in-another-request).
+
+Hover a header or param value to see what it resolves to right now.
+
 ![Environments](screenshots/environments.png)
+
+## Using one response in another request
+
+Write `@` and a request's name inside `{{ }}` to use a value from that request's last response.
+It works in the URL, params, headers, body, auth fields and environment variables:
+
+| Template | Value |
+|---|---|
+| `{{@Login.body.access_token}}` | a JSON field (dots and `[0]` work: `{{@List.body.items[0].id}}`) |
+| `{{@Login.body}}` | the whole response body |
+| `{{@Login.header.Location}}` | a response header (any case) |
+| `{{@Login.status}}` | the status code |
+| `{{@"Get user".body.id}}` | names with spaces or dots go in quotes |
+
+**Fallbacks.** Join alternatives with `??`; the first one that has a value is used:
+
+```
+{{@Login.body.access_token ?? token}}        response first, then the env variable
+{{token ?? @Login.body.access_token}}        env variable first, then the response
+{{@Login.body.region ?? region ?? "eu-1"}}   ...and a fixed default at the end
+```
+
+A term has no value when the request hasn't been sent, the field isn't there, it's empty, or it
+was redacted in stored history.
+
+**Where the response comes from.** The latest response in this session. After a restart, it's the
+request's most recent call in **History**. History hides secrets like tokens and passwords, so
+`@Login.body.access_token` has no value after a restart. Add a fallback, such as an env variable
+that Login's test script sets with `env.set('token', ...)`, or send Login again.
+
+The name is looked up in the same collection first, then in all collections. If you rename a
+request, update the templates that use it. A template that resolves to nothing is sent as written,
+and you'll see *Not resolved: ...* in a message and in the **Tests** tab.
+
+In a collection run, requests run top to bottom, so each one can use responses from the requests
+above it.
 
 ## Responses
 
@@ -107,10 +149,20 @@ and shows a pass/fail table. Closing the dialog stops the run. Each call is also
 
 ## Export and import
 
-- **Export** downloads a JSON file with collections and environments. It asks whether to add call
-  history. Responses can contain tokens, so say no when you plan to share the file.
-- **Import** takes that file (or a RestDesk 0.1 workspace). Choose *merge* to add it to your data, or
-  *replace* to swap your collections and environments for its contents.
+A **project file** is one JSON file with your collections, your environments with all their
+variables, and the active environment. You can open it in RestDesk on any machine, web or desktop.
+
+- **Export** (sidebar footer) lets you choose which collections and environments to include, and
+  whether to add call history (off by default). Variables are exported as they are, including
+  tokens and passwords, so check what's selected before you share the file.
+- **Import** shows what the file contains, then:
+  - **Merge** adds new collections. A collection that came from this project (same id) is
+    updated, not duplicated, so importing the same file twice is safe. An environment with the same
+    name gets the imported variables. *Overwrite variables that already exist* decides whether those
+    replace your current values; variables that are only on your side are kept.
+  - **Replace** swaps your collections and environments for the file's. Replaced collections can
+    be restored from **Trash**.
+- Workspace exports from older RestDesk versions import the same way.
 
 ## Keyboard shortcuts
 

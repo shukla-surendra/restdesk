@@ -38,6 +38,7 @@ CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".png": "image/png",
 }
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 

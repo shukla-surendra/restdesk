@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RestDesk</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" href="icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#6c4ee6">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="app">
   <aside id="sidebar">
     <div class="side-head">
-      <span class="brand">Rest<b>Desk</b></span>
+      <span class="brand"><img src="icon.svg" alt="" width="20" height="20"><span>Rest<b>Desk</b></span></span>
       <button id="btnNewCol" class="icon" title="New collection">＋</button>
     </div>
     <input id="filter" class="filter" placeholder="Filter requests…">
@@ -154,6 +158,33 @@
     <input id="askInput" spellcheck="false" autocomplete="off">
     <div class="row end"><button type="button" data-close>Cancel</button><button id="askOk" class="primary" value="ok">OK</button></div>
   </form>
+</dialog>
+
+<dialog id="exportDialog" class="dlg">
+  <div class="dlg-head"><b>Export project</b><button type="button" class="icon" data-close>✕</button></div>
+  <p class="muted" style="margin:0 0 10px">One JSON file with your collections, environments and their variables.
+    Import it into RestDesk anywhere (web or desktop).</p>
+  <div class="io-cols">
+    <div><div class="io-head"><label><input type="checkbox" data-all="col" checked> Collections</label></div><div id="expCols" class="io-list"></div></div>
+    <div><div class="io-head"><label><input type="checkbox" data-all="env" checked> Environments</label></div><div id="expEnvs" class="io-list"></div></div>
+  </div>
+  <label class="io-opt"><input type="checkbox" id="expHistory"> Include call history <span id="expHistCount" class="muted"></span></label>
+  <p class="io-warn">Variables are exported as they are, including tokens and passwords. Share the file with care.</p>
+  <div class="row end"><button type="button" data-close>Cancel</button><button id="btnDoExport" class="primary">Export</button></div>
+</dialog>
+
+<dialog id="importDialog" class="dlg">
+  <div class="dlg-head"><b>Import project</b><button type="button" class="icon" data-close>✕</button></div>
+  <div id="impSummary" class="io-summary"></div>
+  <label class="io-opt"><input type="radio" name="impMode" value="merge" checked>
+    <span><b>Merge into this project</b><br><span class="muted">New collections are added. A collection that came from this
+    project before (same id) is updated. Environments with the same name get the imported variables.</span></span></label>
+  <label class="io-opt"><input type="radio" name="impMode" value="replace">
+    <span><b>Replace this project</b><br><span class="muted">Your current collections move to Trash and your environments are
+    replaced.</span></span></label>
+  <label class="io-opt" id="impOverwriteRow"><input type="checkbox" id="impOverwrite" checked> Overwrite variables that already exist</label>
+  <label class="io-opt" id="impHistoryRow"><input type="checkbox" id="impHistory" checked> Import call history <span id="impHistCount" class="muted"></span></label>
+  <div class="row end"><button type="button" data-close>Cancel</button><button id="btnDoImport" class="primary">Import</button></div>
 </dialog>
 
 <dialog id="trashDialog" class="dlg wide">

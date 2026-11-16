@@ -11,14 +11,16 @@
     "smoke": "node scripts/smoke.mjs",
     "build:server": "node scripts/build-server.mjs",
     "dist": "npm run build:server && electron-builder",
-    "dist:dir": "npm run build:server && electron-builder --dir"
+    "dist:dir": "npm run build:server && electron-builder --dir",
+    "icons": "electron scripts/render-icon.cjs"
   },
   "build": {
     "appId": "io.github.restdesk",
     "productName": "RestDesk",
     "files": [
       "main.js",
-      "package.json"
+      "package.json",
+      "resources/icon.png"
     ],
     "extraResources": [
       {
@@ -27,7 +29,8 @@
       }
     ],
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "resources"
     },
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -47,7 +50,8 @@
         "deb"
       ],
       "category": "Development"
-    }
+    },
+    "icon": "resources/icon.png"
   },
   "devDependencies": {
     "electron": "^45.3.3",

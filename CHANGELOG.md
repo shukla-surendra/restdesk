@@ -8,6 +8,16 @@
   arrives after you switch away is shown on the request that sent it, not the one now open.
 
 ### Added
+- **Use one response in another request.** `{{@Login.body.access_token}}`, `{{@Login.header.Location}}`
+  and `{{@Login.status}}` read another request's last response (this session, else history), in
+  URLs, params, headers, bodies, auth and env variables. `??` adds fallbacks in any order:
+  `{{@Login.body.token ?? token ?? "default"}}`. Templates that resolve to nothing are reported.
+  Hover a header or param value to see what it resolves to.
+- **Project export/import.** Export lets you choose collections and environments (all variables
+  included) and, optionally, history. Import previews the file, then merges without duplicating
+  ids (environments matched by name get the imported variables, with an overwrite option), or
+  replaces the project.
+- **App icon** for the web UI (favicon, touch icon, sidebar) and the desktop app.
 - **Desktop app.** An Electron wrapper in `desktop/` runs the same UI with a bundled, PyInstaller-frozen
   server, so no Python install is needed. A CI workflow builds macOS, Windows and Linux installers.
   See [docs/desktop.md](docs/desktop.md).

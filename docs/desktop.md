@@ -67,6 +67,12 @@ Builds are unsigned by default. macOS shows a Gatekeeper warning for unsigned ap
   `APPLE_TEAM_ID` for notarization.
 - Windows: `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`.
 
+## Icon
+
+The app icon is `desktop/resources/icon.svg`, and the web favicon is `src/restdesk/static/icon.svg`.
+After editing either one, run `npm run icons` in `desktop/` to regenerate `resources/icon.png` (1024
+px; electron-builder makes the macOS `.icns` and Windows `.ico` from it) and `static/icon-192.png`.
+
 ## Size
 
 About 280 MB unpacked on macOS (Electron itself is most of it, plus about 20 MB for the server), and

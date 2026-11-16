@@ -65,6 +65,10 @@ env.set('token', access_token);
 
 Then set later requests' auth to **Bearer** with the token `{{token}}`.
 
+For simple cases you don't need a script. Read the value straight from the other request's
+response, with a fallback: `{{@Login.body.access_token ?? token}}`. See
+[Using one response in another request](user-guide.md#using-one-response-in-another-request).
+
 ## Notes
 
 - `console.log()` output shows up in the response's **Tests** tab.
